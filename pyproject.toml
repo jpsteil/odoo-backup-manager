@@ -8,7 +8,7 @@ version = "1.0.2"
 description = "A comprehensive backup and restore utility for Odoo instances"
 readme = "README.md"
 requires-python = ">=3.8"
-license = "MIT"
+license = {text = "MIT"}
 authors = [
     {name = "Jim Steil", email = "jim@steilonline.com"},
 ]
@@ -55,6 +55,9 @@ Repository = "https://github.com/jpsteil/odoo-backup-manager"
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["odoo_backup_tool*"]
+
+[tool.setuptools]
+include-package-data = false
 
 [tool.setuptools.package-data]
 odoo_backup_tool = ["py.typed"]
