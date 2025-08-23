@@ -4,20 +4,28 @@
 [![Python versions](https://img.shields.io/pypi/pyversions/odoo-backup-manager.svg)](https://pypi.org/project/odoo-backup-manager/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
-A comprehensive backup and restore utility for Odoo instances, supporting both database and filestore operations with local and remote (SSH) connections.
+A comprehensive backup and restore utility for Odoo instances with smart GUI/CLI interface, supporting both database and filestore operations with local and remote (SSH) connections.
 
 ## Features
 
+- 🎯 **Smart Interface**: Automatically launches GUI when available, falls back to CLI
 - 🗄️ **Complete Backup & Restore**: Handles both PostgreSQL database and Odoo filestore
 - 🔒 **Secure Storage**: Encrypted password storage for connection profiles
 - 🌐 **Remote Support**: Backup/restore from remote servers via SSH
 - 💾 **Connection Profiles**: Save and reuse connection configurations
-- 🖥️ **Dual Interface**: Both CLI and GUI interfaces available
+- 🖥️ **Dual Interface**: Both GUI and CLI modes available
 - 📦 **Archive Management**: Creates compressed archives with metadata
 - 🔄 **Flexible Operations**: Backup only, restore only, or backup & restore in one operation
-- 🛡️ **Production Protection**: Prevent accidental restores to production databases with allow_restore flag
+- 🛡️ **Production Protection**: Prevent accidental restores to production databases
+- 🧪 **Database Neutralization**: Safe testing with disabled emails and reset passwords
 
 ## Installation
+
+### Using pip (Recommended)
+
+```bash
+pip install odoo-backup-manager
+```
 
 ### From Source
 
@@ -29,17 +37,8 @@ cd odoo-backup-manager
 # Install the package
 pip install -e .
 
-# Or install with GUI support
-pip install -e ".[gui]"
-
 # For development
 pip install -r requirements-dev.txt
-```
-
-### Using pip
-
-```bash
-pip install odoo-backup-manager
 ```
 
 ## Prerequisites
@@ -67,85 +66,193 @@ sudo dnf install postgresql
 brew install postgresql
 ```
 
-## Usage
+## Quick Start
 
-### Command Line Interface
+### Default Behavior (v1.1.0+)
 
-#### Basic Backup
 ```bash
-# Backup database and filestore
-odoo-backup backup --name mydb --host localhost --user odoo --filestore /var/lib/odoo/filestore
+# Launch the application (GUI if available, otherwise help)
+odoo-backup
 
-# Backup database only
-odoo-backup backup --name mydb --host localhost --user odoo --no-filestore
+# Force GUI mode (error if not available)
+odoo-backup --gui
 
-# Backup with specific output directory
-odoo-backup backup --name mydb --host localhost --user odoo --output-dir /backups
+# Force CLI mode
+odoo-backup --cli
+
+# Show CLI help
+odoo-backup --cli --help
 ```
 
-#### Basic Restore
-```bash
-# Restore from backup file
-odoo-backup restore --file backup_MYDB_20240101_120000.tar.gz --name newdb --host localhost --user odoo
+### GUI Mode
 
-# Restore database only (skip filestore)
-odoo-backup restore --file backup.tar.gz --name newdb --host localhost --user odoo --no-filestore
-```
-
-#### Connection Management
-```bash
-# List saved connections
-odoo-backup connections list
-
-# Save a new connection (protected by default)
-odoo-backup connections save --name prod --host db.example.com --user odoo --database mydb --filestore /var/lib/odoo
-
-# Save a development connection with restore allowed
-odoo-backup connections save --name dev --host localhost --user odoo --database devdb --filestore /var/lib/odoo --allow-restore
-
-# Test a connection
-odoo-backup connections test prod
-
-# Delete a connection
-odoo-backup connections delete prod
-```
-
-#### Using Saved Connections
-```bash
-# Backup using saved connection
-odoo-backup backup --connection prod --name mydb
-
-# Restore using saved connection
-odoo-backup restore --connection dev --file backup.tar.gz --name restored_db
-```
-
-#### From Odoo Configuration File
-```bash
-# Parse odoo.conf and create backup
-odoo-backup from-config /etc/odoo/odoo.conf --backup
-```
-
-### Graphical User Interface
-
-Launch the GUI:
-```bash
-# Using the command
-odoo-backup gui
-
-# Or using the dedicated launcher
-odoo-backup-gui
-```
+The GUI automatically launches when:
+- You run `odoo-backup` without arguments
+- A display is available (not SSH/Docker)
+- tkinter is installed
 
 The GUI provides:
 - Visual connection management
-- Backup/restore operations with progress tracking
+- Easy backup/restore operations
+- Progress tracking
 - Connection testing
-- Backup file management
-- Operation logs
+- Safety features clearly visible
+
+### CLI Mode
+
+The CLI is used when:
+- You explicitly use `--cli` flag
+- No display is available (SSH, Docker, CI/CD)
+- Running in scripts or automation
+
+## Connection Profiles (Recommended)
+
+### Save Connection Profiles
+
+```bash
+# Production connection (restore disabled by default for safety)
+odoo-backup --cli connections save \
+  --name prod \
+  --host db.example.com \
+  --user odoo \
+  --database mydb \
+  --filestore /var/lib/odoo
+
+# Development connection (with restore enabled)
+odoo-backup --cli connections save \
+  --name dev \
+  --host localhost \
+  --user odoo \
+  --database devdb \
+  --filestore /var/lib/odoo \
+  --allow-restore
+```
+
+### Use Connection Profiles
+
+```bash
+# Backup using connection
+odoo-backup --cli backup --connection prod
+
+# Restore using connection (only works if --allow-restore was set)
+odoo-backup --cli restore --connection dev --file backup.tar.gz --name test_db
+
+# Restore with neutralization for safe testing
+odoo-backup --cli restore --connection dev --file backup.tar.gz --name test_db --neutralize
+```
+
+### List Connections
+
+```bash
+odoo-backup --cli connections list
+# Shows 🔒 for production (restore disabled) or ✅ for dev (restore enabled)
+```
+
+## Manual Operations (Without Profiles)
+
+### Backup Operations
+
+```bash
+# Backup database and filestore
+odoo-backup --cli backup \
+  --name mydb \
+  --host localhost \
+  --user odoo \
+  --filestore /var/lib/odoo/filestore
+
+# Backup database only
+odoo-backup --cli backup \
+  --name mydb \
+  --host localhost \
+  --user odoo \
+  --no-filestore
+
+# Backup with specific output directory
+odoo-backup --cli backup \
+  --name mydb \
+  --host localhost \
+  --user odoo \
+  --output-dir /backups
+```
+
+### Restore Operations
+
+```bash
+# Restore from backup file
+odoo-backup --cli restore \
+  --file backup_MYDB_20240101_120000.tar.gz \
+  --name newdb \
+  --host localhost \
+  --user odoo
+
+# Restore with database neutralization (safe for testing)
+odoo-backup --cli restore \
+  --file backup.tar.gz \
+  --name testdb \
+  --host localhost \
+  --user odoo \
+  --neutralize
+```
+
+## Database Neutralization
+
+When using the `--neutralize` flag during restore, the following safety measures are applied:
+
+- ✉️ All outgoing mail servers are disabled
+- ⏰ All scheduled actions (crons) are disabled  
+- 🔑 Admin password is reset to 'admin'
+- 👥 All user passwords are reset to 'demo'
+- 🔔 All notification channels are disabled
+
+This ensures your test database won't send emails or execute scheduled tasks.
+
+## Automation & Scripting
+
+### Cron Job Example
+
+```bash
+# Add to crontab for daily backups at 2 AM
+0 2 * * * /usr/local/bin/odoo-backup --cli backup --connection prod
+```
+
+### Bash Script Example
+
+```bash
+#!/bin/bash
+# backup-all-databases.sh
+
+DATABASES=("db1" "db2" "db3")
+for DB in "${DATABASES[@]}"; do
+    odoo-backup --cli backup --connection prod --name "$DB"
+done
+```
+
+### Docker Usage
+
+```dockerfile
+# In your Dockerfile
+RUN pip install odoo-backup-manager
+
+# In your script
+CMD ["odoo-backup", "--cli", "backup", "--connection", "prod"]
+```
+
+### CI/CD Pipeline
+
+```yaml
+# .github/workflows/backup.yml
+- name: Backup Odoo Database
+  run: |
+    odoo-backup --cli backup \
+      --name ${{ secrets.DB_NAME }} \
+      --host ${{ secrets.DB_HOST }} \
+      --user ${{ secrets.DB_USER }} \
+      --password ${{ secrets.DB_PASSWORD }}
+```
 
 ## Configuration
 
-The tool stores its configuration in `~/.config/odoo_backup_tool/`:
+The tool stores its configuration in `~/.config/odoo-backup-manager/`:
 - `config.json`: Application settings
 - `connections.db`: Encrypted connection profiles
 
@@ -153,7 +260,7 @@ The tool stores its configuration in `~/.config/odoo_backup_tool/`:
 
 ```json
 {
-  "backup_dir": "~/odoo_backups",
+  "backup_dir": "~/Documents/OdooBackups",
   "default_odoo_version": "17.0",
   "pg_dump_options": ["--no-owner", "--no-acl"],
   "compression_level": 6,
@@ -165,113 +272,67 @@ The tool stores its configuration in `~/.config/odoo_backup_tool/`:
 
 ## Backup File Structure
 
-Backup archives contain:
+Backup archives (`backup_DBNAME_YYYYMMDD_HHMMSS.tar.gz`) contain:
 - `database.sql`: PostgreSQL database dump
 - `filestore.tar.gz`: Compressed filestore data (if included)
 - `metadata.json`: Backup metadata (timestamp, database name, Odoo version)
 
-## Security
+## Security Features
 
-- Passwords are encrypted using machine-specific keys
-- SSH connections support both password and key-based authentication
-- No passwords are stored in plain text
-- Production database protection with `allow_restore` flag (defaults to False)
-  - Connections are protected from restore operations by default
-  - Must explicitly enable restore capability for non-production databases
-  - GUI filters destination connections based on allow_restore setting
-  - CLI validates allow_restore before executing restore operations
-
-## Development
-
-### Project Structure
-
-```
-odoo_backup_tool/
-├── odoo_backup_tool/
-│   ├── __init__.py
-│   ├── cli.py              # CLI entry point
-│   ├── gui_launcher.py     # GUI launcher
-│   ├── core/
-│   │   ├── __init__.py
-│   │   └── backup_restore.py  # Core backup/restore logic
-│   ├── db/
-│   │   ├── __init__.py
-│   │   └── connection_manager.py  # Connection management
-│   ├── gui/
-│   │   ├── __init__.py
-│   │   └── main_window.py  # GUI implementation
-│   └── utils/
-│       ├── __init__.py
-│       └── config.py       # Configuration management
-├── tests/                  # Test suite
-├── setup.py               # Package setup
-├── requirements.txt       # Production dependencies
-├── requirements-dev.txt   # Development dependencies
-└── README.md
-```
-
-### Running Tests
-
-```bash
-# Run all tests
-pytest
-
-# Run with coverage
-pytest --cov=odoo_backup_tool
-
-# Run specific test file
-pytest tests/test_backup_restore.py
-```
-
-### Code Formatting
-
-```bash
-# Format code with black
-black odoo_backup_tool/
-
-# Check code style
-flake8 odoo_backup_tool/
-
-# Type checking
-mypy odoo_backup_tool/
-```
+- 🔐 **Encrypted Storage**: Passwords are encrypted using machine-specific keys
+- 🚫 **Production Protection**: Connections are protected from restore by default
+- 🔑 **SSH Support**: Key-based and password authentication for remote connections
+- 🛡️ **Safe Defaults**: Must explicitly enable restore capability for connections
 
 ## Troubleshooting
 
-### Common Issues
+### GUI Not Launching
 
-1. **Missing PostgreSQL tools**
-   - Install PostgreSQL client tools for your system
-   - Ensure `pg_dump`, `pg_restore`, and `psql` are in PATH
+```bash
+# Check if display is available
+echo $DISPLAY
 
-2. **Permission denied errors**
-   - Ensure the user has read access to filestore directory
-   - Ensure the user has write access to backup directory
+# Install tkinter if missing
+sudo apt-get install python3-tk
 
-3. **GUI not launching**
-   - Install tkinter: `sudo apt-get install python3-tk`
+# Force CLI mode as fallback
+odoo-backup --cli [command]
+```
 
-4. **SSH connection failures**
-   - Verify SSH credentials and connectivity
-   - Check if SSH key has proper permissions (600)
+### Permission Denied
+
+- Ensure read access to filestore directory
+- Ensure write access to backup directory
+- Check PostgreSQL user permissions
+
+### Connection Issues
+
+```bash
+# Test connection manually
+psql -h hostname -U username -d database -c "SELECT version();"
+
+# Check SSH access for remote connections
+ssh user@host "echo 'SSH connection successful'"
+```
 
 ## Contributing
 
 1. Fork the repository
 2. Create a feature branch
 3. Make your changes
-4. Run tests and ensure code quality
+4. Run tests: `pytest`
 5. Submit a pull request
 
 ## License
 
-MIT License - see LICENSE file for details
+MIT License - see [LICENSE](LICENSE) file for details
 
 ## Support
 
-- GitHub Issues: https://github.com/yourusername/odoo-backup-tool/issues
-- Documentation: https://github.com/yourusername/odoo-backup-tool/wiki
+- **Issues**: [GitHub Issues](https://github.com/jpsteil/odoo-backup-manager/issues)
+- **Discussions**: [GitHub Discussions](https://github.com/jpsteil/odoo-backup-manager/discussions)
+- **PyPI**: [odoo-backup-manager](https://pypi.org/project/odoo-backup-manager/)
 
 ## Credits
 
-Developed for the Odoo community to simplify backup and restore operations.
+Developed for the Odoo community to simplify backup and restore operations while maintaining safety and ease of use.

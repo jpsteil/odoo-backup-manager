@@ -683,7 +683,35 @@ ODOO BACKUP MANAGER - HELP GUIDE
 OVERVIEW
 --------
 This tool provides comprehensive backup and restore capabilities for Odoo databases and filestores.
-It supports both local and remote operations via SSH connections.
+It features a smart interface that automatically launches the GUI when available, or falls back to CLI mode.
+
+INTERFACE MODES (v1.1.0+)
+-------------------------
+The application intelligently detects your environment:
+• GUI Mode: Launches automatically when display and tkinter are available
+• CLI Mode: Used in SSH sessions, Docker containers, or when explicitly requested
+
+Launch Options:
+• odoo-backup          - Smart mode (GUI if available, otherwise help)
+• odoo-backup --gui    - Force GUI mode (error if unavailable)
+• odoo-backup --cli    - Force CLI mode
+
+CLI USAGE
+---------
+For automation, scripts, or remote access, use CLI mode:
+
+Connection Management:
+• odoo-backup --cli connections save --name prod --host db.example.com --user odoo
+• odoo-backup --cli connections list
+• odoo-backup --cli connections delete prod
+
+Backup Operations:
+• odoo-backup --cli backup --connection prod
+• odoo-backup --cli backup --name mydb --host localhost --user odoo
+
+Restore Operations:
+• odoo-backup --cli restore --connection dev --file backup.tar.gz --name test_db
+• odoo-backup --cli restore --connection dev --file backup.tar.gz --neutralize
 
 OPERATION MODES
 ---------------
@@ -721,12 +749,17 @@ SSH Connections:
 • Use SSH key authentication (recommended) or password
 • Required for remote filestore operations
 
+Production Safety:
+• Connections are protected from restore by default
+• Must explicitly enable "Allow Restore" for non-production connections
+• CLI respects the same safety settings as GUI
+
 BACKUP FILES
 ------------
 • View all backup files in your configured directory
 • Double-click to view backup details
 • Delete old backups to save space
-• Files are named with timestamp: backup_YYYYMMDD_HHMMSS.tar.gz
+• Files are named with timestamp: backup_DBNAME_YYYYMMDD_HHMMSS.tar.gz
 
 BACKUP STRUCTURE
 ----------------
@@ -734,6 +767,19 @@ Each backup archive contains:
 • database.sql - PostgreSQL dump of the database
 • filestore.tar.gz - Compressed Odoo filestore (if included)
 • metadata.json - Backup information and version details
+
+AUTOMATION
+----------
+Schedule backups using cron:
+0 2 * * * /usr/local/bin/odoo-backup --cli backup --connection prod
+
+Use in Docker containers:
+docker run -it myimage odoo-backup --cli backup --connection prod
+
+Script multiple databases:
+for DB in db1 db2 db3; do
+    odoo-backup --cli backup --connection prod --name "$DB"
+done
 
 BEST PRACTICES
 --------------
@@ -743,9 +789,16 @@ BEST PRACTICES
 4. Use SSH keys instead of passwords for remote connections
 5. Monitor available disk space before large operations
 6. Verify Odoo version compatibility when restoring
+7. Use connection profiles instead of manual parameters
+8. Protect production connections (disable restore)
 
 TROUBLESHOOTING
 ---------------
+GUI Not Launching:
+• Check DISPLAY environment variable: echo $DISPLAY
+• Install tkinter: sudo apt-get install python3-tk
+• Use CLI mode as fallback: odoo-backup --cli
+
 Connection Failed:
 • Verify host, port, and credentials
 • Check network connectivity
@@ -762,6 +815,7 @@ Restore Failed:
 • Check available disk space
 • Verify backup file integrity
 • Ensure matching Odoo versions
+• Check if connection allows restore operations
 
 KEYBOARD SHORTCUTS
 ------------------
@@ -776,6 +830,7 @@ SAFETY FEATURES
 • Progress indication for long-running tasks
 • Detailed logging of all operations
 • Automatic backup file verification
+• Smart GUI/CLI detection prevents errors
 
 For more information or to report issues, visit:
 https://github.com/jpsteil/odoo-backup-manager
@@ -795,10 +850,10 @@ https://github.com/jpsteil/odoo-backup-manager
         help_text.config(state="normal")
         
         # Apply heading tags
-        for pattern in ["ODOO BACKUP MANAGER - HELP GUIDE", "OVERVIEW", "OPERATION MODES", 
-                       "DATABASE NEUTRALIZATION", "CONNECTIONS", "BACKUP FILES", 
-                       "BACKUP STRUCTURE", "BEST PRACTICES", "TROUBLESHOOTING", 
-                       "KEYBOARD SHORTCUTS", "SAFETY FEATURES"]:
+        for pattern in ["ODOO BACKUP MANAGER - HELP GUIDE", "OVERVIEW", "INTERFACE MODES", 
+                       "CLI USAGE", "OPERATION MODES", "DATABASE NEUTRALIZATION", 
+                       "CONNECTIONS", "BACKUP FILES", "BACKUP STRUCTURE", "AUTOMATION",
+                       "BEST PRACTICES", "TROUBLESHOOTING", "KEYBOARD SHORTCUTS", "SAFETY FEATURES"]:
             start = "1.0"
             while True:
                 pos = help_text.search(pattern, start, stopindex="end")
