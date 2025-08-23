@@ -23,9 +23,19 @@ class Config:
     def __init__(self, config_file=None):
         """Initialize configuration"""
         if config_file is None:
-            config_dir = Path.home() / ".config" / "odoo_backup_tool"
+            # Use new location
+            config_dir = Path.home() / ".config" / "odoo-backup-manager"
+            old_config_dir = Path.home() / ".config" / "odoo_backup_tool"
+            
             config_dir.mkdir(parents=True, exist_ok=True)
             config_file = config_dir / "config.json"
+            
+            # Migrate old config if it exists
+            old_config_file = old_config_dir / "config.json"
+            if not config_file.exists() and old_config_file.exists():
+                import shutil
+                shutil.copy2(old_config_file, config_file)
+                print(f"Migrated config from old location to {config_file}")
 
         self.config_file = Path(config_file)
         self.config = self.load_config()
