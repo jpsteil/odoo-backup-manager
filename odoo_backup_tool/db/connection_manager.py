@@ -1,0 +1,550 @@
+"""
+Connection Manager for Odoo Backup Tool
+Handles storage and retrieval of database and SSH connection profiles with encryption
+"""
+
+import os
+import sqlite3
+import base64
+from pathlib import Path
+from cryptography.fernet import Fernet
+from cryptography.hazmat.primitives import hashes
+from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
+
+
+class ConnectionManager:
+    """Manage saved database connections with encrypted passwords"""
+
+    def __init__(self, db_path=None):
+        if db_path is None:
+            # Store database in user's home directory
+            home_dir = Path.home()
+            config_dir = home_dir / ".config" / "odoo_backup_tool"
+            config_dir.mkdir(parents=True, exist_ok=True)
+            db_path = config_dir / "connections.db"
+        self.db_path = str(db_path)
+        self.cipher_suite = self._get_cipher()
+        self._init_db()
+
+    def _get_cipher(self):
+        """Create encryption cipher using machine-specific key"""
+        # Use machine ID and username for key generation
+        machine_id = str(os.getuid()) + os.path.expanduser("~")
+        kdf = PBKDF2HMAC(
+            algorithm=hashes.SHA256(),
+            length=32,
+            salt=b"odoo_backup_salt_v1",
+            iterations=100000,
+        )
+        key = base64.urlsafe_b64encode(kdf.derive(machine_id.encode()))
+        return Fernet(key)
+
+    def _init_db(self):
+        """Initialize SQLite database with proper 3NF schema"""
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+
+        # Check if we need to migrate from old single-table schema
+        cursor.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='connections'"
+        )
+        old_table_exists = cursor.fetchone() is not None
+
+        # Create SSH connections table
+        cursor.execute(
+            """
+            CREATE TABLE IF NOT EXISTS ssh_connections (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT UNIQUE NOT NULL,
+                host TEXT NOT NULL,
+                port INTEGER NOT NULL DEFAULT 22,
+                username TEXT NOT NULL,
+                password TEXT,
+                key_path TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+            """
+        )
+
+        # Create Odoo connections table with foreign key to SSH connections
+        cursor.execute(
+            """
+            CREATE TABLE IF NOT EXISTS odoo_connections (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT UNIQUE NOT NULL,
+                host TEXT NOT NULL,
+                port INTEGER NOT NULL DEFAULT 5432,
+                database TEXT,
+                username TEXT NOT NULL,
+                password TEXT,
+                filestore_path TEXT,
+                odoo_version TEXT DEFAULT '17.0',
+                is_local BOOLEAN DEFAULT 0,
+                allow_restore BOOLEAN DEFAULT 0,
+                ssh_connection_id INTEGER,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (ssh_connection_id) REFERENCES ssh_connections(id) ON DELETE SET NULL
+            )
+            """
+        )
+
+        # Create settings table
+        cursor.execute(
+            """
+            CREATE TABLE IF NOT EXISTS settings (
+                key TEXT PRIMARY KEY,
+                value TEXT,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+            """
+        )
+
+        # Migrate data from old schema if it exists
+        if old_table_exists:
+            self._migrate_old_schema(cursor)
+            cursor.execute("DROP TABLE connections")
+
+        conn.commit()
+        conn.close()
+
+    def _migrate_old_schema(self, cursor):
+        """Migrate data from old single-table schema to new 3NF schema"""
+        cursor.execute("SELECT * FROM connections")
+        old_connections = cursor.fetchall()
+
+        # Get column names for mapping
+        cursor.execute("PRAGMA table_info(connections)")
+        columns_info = cursor.fetchall()
+        column_names = [col[1] for col in columns_info]
+
+        for row in old_connections:
+            # Create a dict for easier access
+            conn_data = dict(zip(column_names, row))
+
+            # Determine connection type
+            conn_type = conn_data.get("connection_type", "odoo")
+
+            if conn_type == "ssh":
+                # Migrate SSH connection
+                try:
+                    cursor.execute(
+                        """
+                        INSERT INTO ssh_connections (name, host, port, username, password, key_path)
+                        VALUES (?, ?, ?, ?, ?, ?)
+                        """,
+                        (
+                            conn_data.get("name"),
+                            conn_data.get(
+                                "host", conn_data.get("ssh_host", "localhost")
+                            ),
+                            conn_data.get("port", conn_data.get("ssh_port", 22)),
+                            conn_data.get("username", conn_data.get("ssh_user", "")),
+                            conn_data.get("password", conn_data.get("ssh_password")),
+                            conn_data.get("ssh_key_path", ""),
+                        ),
+                    )
+                except sqlite3.IntegrityError:
+                    pass  # Skip duplicates
+            else:
+                # Migrate Odoo connection
+                # First check if it references an SSH connection
+                ssh_conn_id = None
+                if conn_data.get("use_ssh") and conn_data.get("ssh_host"):
+                    # Try to find matching SSH connection
+                    cursor.execute(
+                        "SELECT id FROM ssh_connections WHERE host = ? AND username = ?",
+                        (conn_data.get("ssh_host"), conn_data.get("ssh_user", "")),
+                    )
+                    ssh_result = cursor.fetchone()
+                    if ssh_result:
+                        ssh_conn_id = ssh_result[0]
+
+                try:
+                    cursor.execute(
+                        """
+                        INSERT INTO odoo_connections 
+                        (name, host, port, database, username, password, filestore_path, 
+                         odoo_version, is_local, ssh_connection_id)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        (
+                            conn_data.get("name"),
+                            conn_data.get("host", "localhost"),
+                            conn_data.get("port", 5432),
+                            conn_data.get("database", ""),
+                            conn_data.get("username", "odoo"),
+                            conn_data.get("password"),
+                            conn_data.get("filestore_path", ""),
+                            conn_data.get("odoo_version", "17.0"),
+                            conn_data.get("is_local", False),
+                            ssh_conn_id,
+                        ),
+                    )
+                except sqlite3.IntegrityError:
+                    pass  # Skip duplicates
+
+    def save_ssh_connection(self, name, config):
+        """Save an SSH connection profile"""
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+
+        # Encrypt password if provided
+        encrypted_password = None
+        if config.get("password"):
+            encrypted_password = self.cipher_suite.encrypt(
+                config["password"].encode()
+            ).decode()
+
+        try:
+            cursor.execute(
+                """
+                INSERT OR REPLACE INTO ssh_connections 
+                (name, host, port, username, password, key_path)
+                VALUES (?, ?, ?, ?, ?, ?)
+            """,
+                (
+                    name,
+                    config.get("host", "localhost"),
+                    config.get("port", 22),
+                    config.get("username", ""),
+                    encrypted_password,
+                    config.get("ssh_key_path", ""),
+                ),
+            )
+            conn.commit()
+            return True
+        except sqlite3.IntegrityError:
+            return False
+        finally:
+            conn.close()
+
+    def save_odoo_connection(self, name, config):
+        """Save an Odoo connection profile"""
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+
+        # Encrypt password if provided
+        encrypted_password = None
+        if config.get("password"):
+            encrypted_password = self.cipher_suite.encrypt(
+                config["password"].encode()
+            ).decode()
+
+        # Get SSH connection ID if specified
+        ssh_conn_id = None
+        if config.get("ssh_connection_name"):
+            cursor.execute(
+                "SELECT id FROM ssh_connections WHERE name = ?",
+                (config["ssh_connection_name"],),
+            )
+            result = cursor.fetchone()
+            if result:
+                ssh_conn_id = result[0]
+
+        try:
+            cursor.execute(
+                """
+                INSERT OR REPLACE INTO odoo_connections 
+                (name, host, port, database, username, password, filestore_path, 
+                 odoo_version, is_local, allow_restore, ssh_connection_id)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+                (
+                    name,
+                    config.get("host", "localhost"),
+                    config.get("port", 5432),
+                    config.get("database", ""),
+                    config.get("username", "odoo"),
+                    encrypted_password,
+                    config.get("filestore_path", ""),
+                    config.get("odoo_version", "17.0"),
+                    config.get("is_local", False),
+                    config.get("allow_restore", False),  # Default to False for safety
+                    ssh_conn_id,
+                ),
+            )
+            conn.commit()
+            return True
+        except sqlite3.IntegrityError:
+            return False
+        finally:
+            conn.close()
+
+    def save_connection(self, name, config):
+        """Save a connection - routes to appropriate method based on type"""
+        conn_type = config.get("connection_type", "odoo")
+        if conn_type == "ssh":
+            return self.save_ssh_connection(name, config)
+        else:
+            return self.save_odoo_connection(name, config)
+
+    def update_ssh_connection(self, conn_id, name, config):
+        """Update an SSH connection by ID"""
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+
+        # Encrypt password if provided
+        encrypted_password = None
+        if config.get("password"):
+            encrypted_password = self.cipher_suite.encrypt(
+                config["password"].encode()
+            ).decode()
+
+        try:
+            cursor.execute(
+                """
+                UPDATE ssh_connections 
+                SET name = ?, host = ?, port = ?, username = ?, password = ?, key_path = ?
+                WHERE id = ?
+            """,
+                (
+                    name,
+                    config.get("host", "localhost"),
+                    config.get("port", 22),
+                    config.get("username", ""),
+                    encrypted_password,
+                    config.get("ssh_key_path", ""),
+                    conn_id,
+                ),
+            )
+            conn.commit()
+            return cursor.rowcount > 0
+        except sqlite3.IntegrityError:
+            return False
+        finally:
+            conn.close()
+
+    def update_odoo_connection(self, conn_id, name, config):
+        """Update an Odoo connection by ID"""
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+
+        # Encrypt password if provided
+        encrypted_password = None
+        if config.get("password"):
+            encrypted_password = self.cipher_suite.encrypt(
+                config["password"].encode()
+            ).decode()
+
+        # SSH connection ID is passed directly now
+        ssh_conn_id = config.get("ssh_connection_id")
+
+        try:
+            cursor.execute(
+                """
+                UPDATE odoo_connections 
+                SET name = ?, host = ?, port = ?, database = ?, username = ?, 
+                    password = ?, filestore_path = ?, odoo_version = ?, 
+                    is_local = ?, allow_restore = ?, ssh_connection_id = ?
+                WHERE id = ?
+            """,
+                (
+                    name,
+                    config.get("host", "localhost"),
+                    config.get("port", 5432),
+                    config.get("database", ""),
+                    config.get("username", "odoo"),
+                    encrypted_password,
+                    config.get("filestore_path", ""),
+                    config.get("odoo_version", "17.0"),
+                    config.get("is_local", False),
+                    config.get("allow_restore", False),  # Default to False for safety
+                    ssh_conn_id,
+                    conn_id,
+                ),
+            )
+            conn.commit()
+            return cursor.rowcount > 0
+        except sqlite3.IntegrityError:
+            return False
+        finally:
+            conn.close()
+
+    def get_ssh_connection(self, conn_id):
+        """Get an SSH connection by ID"""
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        cursor.execute("SELECT * FROM ssh_connections WHERE id = ?", (conn_id,))
+        row = cursor.fetchone()
+        conn.close()
+
+        if row:
+            config = {
+                "id": row[0],
+                "name": row[1],
+                "host": row[2],
+                "port": row[3],
+                "username": row[4],
+                "password": None,
+                "ssh_key_path": row[6] if len(row) > 6 and row[6] else "",
+                "connection_type": "ssh",
+            }
+            # Decrypt password
+            if len(row) > 5 and row[5]:
+                try:
+                    config["password"] = self.cipher_suite.decrypt(
+                        row[5].encode()
+                    ).decode()
+                except:
+                    pass
+            return config
+        return None
+
+    def get_odoo_connection(self, conn_id):
+        """Get an Odoo connection by ID"""
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            SELECT o.*, s.name as ssh_name, s.host as ssh_host, s.port as ssh_port,
+                   s.username as ssh_user, s.password as ssh_pass, s.key_path
+            FROM odoo_connections o
+            LEFT JOIN ssh_connections s ON o.ssh_connection_id = s.id
+            WHERE o.id = ?
+        """,
+            (conn_id,),
+        )
+        row = cursor.fetchone()
+        conn.close()
+
+        if row:
+            # Column positions in odoo_connections table:
+            # 0: id, 1: name, 2: host, 3: port, 4: database, 5: username, 6: password
+            # 7: filestore_path, 8: odoo_version, 9: is_local, 10: ssh_connection_id
+            # 11: created_at, 12: updated_at, 13: allow_restore
+            # Plus joined SSH columns starting at index 14
+            
+            config = {
+                "id": row[0],
+                "name": row[1],
+                "host": row[2],
+                "port": row[3],
+                "database": row[4] if row[4] else "",
+                "username": row[5],
+                "password": None,
+                "filestore_path": row[7] if row[7] else "",
+                "odoo_version": row[8] if row[8] else "17.0",
+                "is_local": row[9] if row[9] else False,
+                "ssh_connection_id": row[10] if row[10] else None,  # Correct position
+                "allow_restore": row[13] if len(row) > 13 else False,  # Correct position
+                "use_ssh": row[10] is not None,  # Has SSH if ssh_connection_id exists
+                # SSH joined columns start at position 14
+                "ssh_connection_name": row[14] if len(row) > 14 and row[10] else "",
+                "ssh_host": row[15] if len(row) > 15 and row[10] else "",
+                "ssh_port": row[16] if len(row) > 16 and row[10] else 22,
+                "ssh_user": row[17] if len(row) > 17 and row[10] else "",
+                "ssh_password": None,
+                "ssh_key_path": row[19] if len(row) > 19 and row[10] else "",
+                "connection_type": "odoo",
+            }
+
+            # Decrypt Odoo password
+            if row[6]:
+                try:
+                    config["password"] = self.cipher_suite.decrypt(
+                        row[6].encode()
+                    ).decode()
+                except:
+                    pass
+
+            # Decrypt SSH password if exists
+            if row[10] and len(row) > 18 and row[18]:
+                try:
+                    config["ssh_password"] = self.cipher_suite.decrypt(
+                        row[18].encode()
+                    ).decode()
+                except:
+                    pass
+
+            return config
+        return None
+
+    def list_connections(self):
+        """List all saved connections from both tables with IDs"""
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+
+        # Get all connections with ID, name, and type info
+        all_connections = []
+
+        # Get SSH connections
+        cursor.execute(
+            "SELECT id, name, host, port, username FROM ssh_connections ORDER BY name"
+        )
+        for row in cursor.fetchall():
+            all_connections.append(
+                {
+                    "id": row[0],
+                    "name": row[1],
+                    "host": row[2],
+                    "port": row[3],
+                    "username": row[4],
+                    "type": "ssh",
+                }
+            )
+
+        # Get Odoo connections
+        cursor.execute(
+            "SELECT id, name, host, port, database, username, allow_restore FROM odoo_connections ORDER BY name"
+        )
+        for row in cursor.fetchall():
+            all_connections.append(
+                {
+                    "id": row[0],
+                    "name": row[1],
+                    "host": row[2],
+                    "port": row[3],
+                    "database": row[4],
+                    "username": row[5],
+                    "allow_restore": row[6] if len(row) > 6 else False,
+                    "type": "odoo",
+                }
+            )
+
+        conn.close()
+        return all_connections
+
+    def delete_ssh_connection(self, conn_id):
+        """Delete an SSH connection by ID"""
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        cursor.execute("DELETE FROM ssh_connections WHERE id = ?", (conn_id,))
+        conn.commit()
+        affected = cursor.rowcount > 0
+        conn.close()
+        return affected
+
+    def delete_odoo_connection(self, conn_id):
+        """Delete an Odoo connection by ID"""
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        cursor.execute("DELETE FROM odoo_connections WHERE id = ?", (conn_id,))
+        conn.commit()
+        affected = cursor.rowcount > 0
+        conn.close()
+        return affected
+
+    def get_setting(self, key, default=None):
+        """Get a setting value from the database"""
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        cursor.execute("SELECT value FROM settings WHERE key = ?", (key,))
+        result = cursor.fetchone()
+        conn.close()
+        return result[0] if result else default
+
+    def set_setting(self, key, value):
+        """Set a setting value in the database"""
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            INSERT OR REPLACE INTO settings (key, value, updated_at)
+            VALUES (?, ?, CURRENT_TIMESTAMP)
+            """,
+            (key, value),
+        )
+        conn.commit()
+        conn.close()

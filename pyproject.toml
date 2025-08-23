@@ -1,0 +1,61 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "odoo-backup-tool"
+version = "1.0.0"
+description = "A comprehensive backup and restore utility for Odoo instances"
+readme = "README.md"
+requires-python = ">=3.8"
+license = "MIT"
+authors = [
+    {name = "Odoo Backup Tool Team"},
+]
+keywords = ["odoo", "backup", "restore", "database", "postgresql"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: System Administrators",
+    "Topic :: System :: Archiving :: Backup",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.8",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Operating System :: OS Independent",
+]
+
+dependencies = [
+    "cryptography>=41.0.0",
+    "paramiko>=3.0.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0.0",
+    "pytest-cov>=4.0.0",
+    "black>=23.0.0",
+    "flake8>=6.0.0",
+    "mypy>=1.0.0",
+    "build>=0.10.0",
+    "twine>=4.0.0",
+]
+
+[project.scripts]
+odoo-backup = "odoo_backup_tool.cli:main"
+odoo-backup-gui = "odoo_backup_tool.gui_launcher:main"
+
+[project.urls]
+Homepage = "https://github.com/jpsteil/odoo-backup-tool"
+Documentation = "https://github.com/jpsteil/odoo-backup-tool#readme"
+"Bug Tracker" = "https://github.com/jpsteil/odoo-backup-tool/issues"
+Repository = "https://github.com/jpsteil/odoo-backup-tool"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["odoo_backup_tool*"]
+
+[tool.setuptools.package-data]
+odoo_backup_tool = ["py.typed"]
