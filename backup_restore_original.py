@@ -1,27 +1,1412 @@
+#!/usr/bin/env python3
 """
-GUI interface for Odoo Backup Tool
-Full implementation from original backup_restore.py
+Odoo Database and Filestore Backup/Restore Tool with GUI and Connection Manager
+This script handles complete backup and restoration of Odoo instances,
+including PostgreSQL database and filestore data, with saved connection profiles.
 """
 
-import tkinter as tk
-from tkinter import ttk, messagebox, filedialog, scrolledtext
-import threading
 import os
-from pathlib import Path
+import sys
+import argparse
+import subprocess
+import shutil
+import tarfile
+import tempfile
 from datetime import datetime
+from pathlib import Path
 import json
-import socket
+import getpass
+import threading
+import queue
+import sqlite3
+import base64
+from cryptography.fernet import Fernet
+from cryptography.hazmat.primitives import hashes
+from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
+import hashlib
+import configparser
 import paramiko
+from io import StringIO
+import socket
 
-from ..core.backup_restore import OdooBackupRestore
-from ..db.connection_manager import ConnectionManager
+# Try to import tkinter, but make it optional
+try:
+    import tkinter as tk
+    from tkinter import ttk, filedialog, messagebox, scrolledtext
+
+    TKINTER_AVAILABLE = True
+except ImportError:
+    TKINTER_AVAILABLE = False
+    print("Warning: tkinter not available. GUI mode disabled.")
+    print("To install tkinter on Ubuntu/Debian: sudo apt-get install python3-tk")
+    print("To install tkinter on RHEL/CentOS/Fedora: sudo dnf install python3-tkinter")
+    print("Using CLI mode instead.\n")
+
+
+class ConnectionManager:
+    """Manage saved database connections with encrypted passwords"""
+
+    def __init__(self, db_path=None):
+        if db_path is None:
+            # Store database in the same directory as this script
+            script_dir = os.path.dirname(os.path.abspath(__file__))
+            db_path = os.path.join(script_dir, "odoo_backup_connections.db")
+        self.db_path = db_path
+        self.cipher_suite = self._get_cipher()
+        self._init_db()
+
+    def _get_cipher(self):
+        """Create encryption cipher using machine-specific key"""
+        # Use machine ID and username for key generation
+        machine_id = str(os.getuid()) + os.path.expanduser("~")
+        kdf = PBKDF2HMAC(
+            algorithm=hashes.SHA256(),
+            length=32,
+            salt=b"odoo_backup_salt_v1",
+            iterations=100000,
+        )
+        key = base64.urlsafe_b64encode(kdf.derive(machine_id.encode()))
+        return Fernet(key)
+
+    def _init_db(self):
+        """Initialize SQLite database with proper 3NF schema"""
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        
+        # Check if we need to migrate from old single-table schema
+        cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='connections'")
+        old_table_exists = cursor.fetchone() is not None
+        
+        # Create SSH connections table
+        cursor.execute(
+            """
+            CREATE TABLE IF NOT EXISTS ssh_connections (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT UNIQUE NOT NULL,
+                host TEXT NOT NULL,
+                port INTEGER NOT NULL DEFAULT 22,
+                username TEXT NOT NULL,
+                password TEXT,
+                key_path TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+            """
+        )
+        
+        # Create Odoo connections table with foreign key to SSH connections
+        cursor.execute(
+            """
+            CREATE TABLE IF NOT EXISTS odoo_connections (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT UNIQUE NOT NULL,
+                host TEXT NOT NULL,
+                port INTEGER NOT NULL DEFAULT 5432,
+                database TEXT,
+                username TEXT NOT NULL,
+                password TEXT,
+                filestore_path TEXT,
+                odoo_version TEXT DEFAULT '17.0',
+                is_local BOOLEAN DEFAULT 0,
+                ssh_connection_id INTEGER,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (ssh_connection_id) REFERENCES ssh_connections(id) ON DELETE SET NULL
+            )
+            """
+        )
+        
+        # Create settings table
+        cursor.execute(
+            """
+            CREATE TABLE IF NOT EXISTS settings (
+                key TEXT PRIMARY KEY,
+                value TEXT,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+            """
+        )
+        
+        # Migrate data from old schema if it exists
+        if old_table_exists:
+            cursor.execute("SELECT * FROM connections")
+            old_connections = cursor.fetchall()
+            
+            # Get column names for mapping
+            cursor.execute("PRAGMA table_info(connections)")
+            columns_info = cursor.fetchall()
+            column_names = [col[1] for col in columns_info]
+            
+            for row in old_connections:
+                # Create a dict for easier access
+                conn_data = dict(zip(column_names, row))
+                
+                # Determine connection type
+                conn_type = conn_data.get('connection_type', 'odoo')
+                
+                if conn_type == 'ssh':
+                    # Migrate SSH connection
+                    try:
+                        cursor.execute(
+                            """
+                            INSERT INTO ssh_connections (name, host, port, username, password, key_path)
+                            VALUES (?, ?, ?, ?, ?, ?)
+                            """,
+                            (
+                                conn_data.get('name'),
+                                conn_data.get('host', conn_data.get('ssh_host', 'localhost')),
+                                conn_data.get('port', conn_data.get('ssh_port', 22)),
+                                conn_data.get('username', conn_data.get('ssh_user', '')),
+                                conn_data.get('password', conn_data.get('ssh_password')),
+                                conn_data.get('ssh_key_path', '')
+                            )
+                        )
+                    except sqlite3.IntegrityError:
+                        pass  # Skip duplicates
+                else:
+                    # Migrate Odoo connection
+                    # First check if it references an SSH connection
+                    ssh_conn_id = None
+                    if conn_data.get('use_ssh') and conn_data.get('ssh_host'):
+                        # Try to find matching SSH connection
+                        cursor.execute(
+                            "SELECT id FROM ssh_connections WHERE host = ? AND username = ?",
+                            (conn_data.get('ssh_host'), conn_data.get('ssh_user', ''))
+                        )
+                        ssh_result = cursor.fetchone()
+                        if ssh_result:
+                            ssh_conn_id = ssh_result[0]
+                    
+                    try:
+                        cursor.execute(
+                            """
+                            INSERT INTO odoo_connections 
+                            (name, host, port, database, username, password, filestore_path, 
+                             odoo_version, is_local, ssh_connection_id)
+                            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                            """,
+                            (
+                                conn_data.get('name'),
+                                conn_data.get('host', 'localhost'),
+                                conn_data.get('port', 5432),
+                                conn_data.get('database', ''),
+                                conn_data.get('username', 'odoo'),
+                                conn_data.get('password'),
+                                conn_data.get('filestore_path', ''),
+                                conn_data.get('odoo_version', '17.0'),
+                                conn_data.get('is_local', False),
+                                ssh_conn_id
+                            )
+                        )
+                    except sqlite3.IntegrityError:
+                        pass  # Skip duplicates
+            
+            # Drop the old table after migration
+            cursor.execute("DROP TABLE connections")
+        
+        conn.commit()
+        conn.close()
+
+    def save_ssh_connection(self, name, config):
+        """Save an SSH connection profile"""
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+
+        # Encrypt password if provided
+        encrypted_password = None
+        if config.get("password"):
+            encrypted_password = self.cipher_suite.encrypt(
+                config["password"].encode()
+            ).decode()
+
+        try:
+            cursor.execute(
+                """
+                INSERT OR REPLACE INTO ssh_connections 
+                (name, host, port, username, password, key_path)
+                VALUES (?, ?, ?, ?, ?, ?)
+            """,
+                (
+                    name,
+                    config.get("host", "localhost"),
+                    config.get("port", 22),
+                    config.get("username", ""),
+                    encrypted_password,
+                    config.get("ssh_key_path", "")
+                ),
+            )
+            conn.commit()
+            return True
+        except sqlite3.IntegrityError:
+            return False
+        finally:
+            conn.close()
+    
+    def save_odoo_connection(self, name, config):
+        """Save an Odoo connection profile"""
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+
+        # Encrypt password if provided
+        encrypted_password = None
+        if config.get("password"):
+            encrypted_password = self.cipher_suite.encrypt(
+                config["password"].encode()
+            ).decode()
+        
+        # Get SSH connection ID if specified
+        ssh_conn_id = None
+        if config.get("ssh_connection_name"):
+            cursor.execute(
+                "SELECT id FROM ssh_connections WHERE name = ?",
+                (config["ssh_connection_name"],)
+            )
+            result = cursor.fetchone()
+            if result:
+                ssh_conn_id = result[0]
+
+        try:
+            cursor.execute(
+                """
+                INSERT OR REPLACE INTO odoo_connections 
+                (name, host, port, database, username, password, filestore_path, 
+                 odoo_version, is_local, ssh_connection_id)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+                (
+                    name,
+                    config.get("host", "localhost"),
+                    config.get("port", 5432),
+                    config.get("database", ""),
+                    config.get("username", "odoo"),
+                    encrypted_password,
+                    config.get("filestore_path", ""),
+                    config.get("odoo_version", "17.0"),
+                    config.get("is_local", False),
+                    ssh_conn_id
+                ),
+            )
+            conn.commit()
+            return True
+        except sqlite3.IntegrityError:
+            return False
+        finally:
+            conn.close()
+    
+    def save_connection(self, name, config):
+        """Save a connection - routes to appropriate method based on type"""
+        conn_type = config.get("connection_type", "odoo")
+        if conn_type == "ssh":
+            return self.save_ssh_connection(name, config)
+        else:
+            return self.save_odoo_connection(name, config)
+    
+    def update_ssh_connection(self, conn_id, name, config):
+        """Update an SSH connection by ID"""
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+
+        # Encrypt password if provided
+        encrypted_password = None
+        if config.get("password"):
+            encrypted_password = self.cipher_suite.encrypt(
+                config["password"].encode()
+            ).decode()
+
+        try:
+            cursor.execute(
+                """
+                UPDATE ssh_connections 
+                SET name = ?, host = ?, port = ?, username = ?, password = ?, key_path = ?
+                WHERE id = ?
+            """,
+                (
+                    name,
+                    config.get("host", "localhost"),
+                    config.get("port", 22),
+                    config.get("username", ""),
+                    encrypted_password,
+                    config.get("ssh_key_path", ""),
+                    conn_id
+                ),
+            )
+            conn.commit()
+            return cursor.rowcount > 0
+        except sqlite3.IntegrityError:
+            return False
+        finally:
+            conn.close()
+    
+    def update_odoo_connection(self, conn_id, name, config):
+        """Update an Odoo connection by ID"""
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+
+        # Encrypt password if provided
+        encrypted_password = None
+        if config.get("password"):
+            encrypted_password = self.cipher_suite.encrypt(
+                config["password"].encode()
+            ).decode()
+        
+        # SSH connection ID is passed directly now
+        ssh_conn_id = config.get("ssh_connection_id")
+
+        try:
+            cursor.execute(
+                """
+                UPDATE odoo_connections 
+                SET name = ?, host = ?, port = ?, database = ?, username = ?, 
+                    password = ?, filestore_path = ?, odoo_version = ?, 
+                    is_local = ?, ssh_connection_id = ?
+                WHERE id = ?
+            """,
+                (
+                    name,
+                    config.get("host", "localhost"),
+                    config.get("port", 5432),
+                    config.get("database", ""),
+                    config.get("username", "odoo"),
+                    encrypted_password,
+                    config.get("filestore_path", ""),
+                    config.get("odoo_version", "17.0"),
+                    config.get("is_local", False),
+                    ssh_conn_id,
+                    conn_id
+                ),
+            )
+            conn.commit()
+            return cursor.rowcount > 0
+        except sqlite3.IntegrityError:
+            return False
+        finally:
+            conn.close()
+    
+    def get_ssh_connection(self, conn_id):
+        """Get an SSH connection by ID"""
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        cursor.execute("SELECT * FROM ssh_connections WHERE id = ?", (conn_id,))
+        row = cursor.fetchone()
+        conn.close()
+        
+        if row:
+            config = {
+                "id": row[0],
+                "name": row[1],
+                "host": row[2],
+                "port": row[3],
+                "username": row[4],
+                "password": None,
+                "ssh_key_path": row[6] if len(row) > 6 and row[6] else "",
+                "connection_type": "ssh"
+            }
+            # Decrypt password
+            if len(row) > 5 and row[5]:
+                try:
+                    config["password"] = self.cipher_suite.decrypt(row[5].encode()).decode()
+                except:
+                    pass
+            return config
+        return None
+    
+    def get_odoo_connection(self, conn_id):
+        """Get an Odoo connection by ID"""
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT o.*, s.name as ssh_name, s.host as ssh_host, s.port as ssh_port,
+                   s.username as ssh_user, s.password as ssh_pass, s.key_path
+            FROM odoo_connections o
+            LEFT JOIN ssh_connections s ON o.ssh_connection_id = s.id
+            WHERE o.id = ?
+        """, (conn_id,))
+        row = cursor.fetchone()
+        conn.close()
+        
+        if row:
+            config = {
+                "id": row[0],
+                "name": row[1],
+                "host": row[2],
+                "port": row[3],
+                "database": row[4] if row[4] else "",
+                "username": row[5],
+                "password": None,
+                "filestore_path": row[7] if row[7] else "",
+                "odoo_version": row[8] if row[8] else "17.0",
+                "is_local": row[9] if row[9] else False,
+                "use_ssh": row[10] is not None,
+                "ssh_connection_id": row[10] if row[10] else None,
+                "ssh_connection_name": row[13] if row[10] and len(row) > 13 else "",
+                "ssh_host": row[14] if row[10] and len(row) > 14 else "",
+                "ssh_port": row[15] if row[10] and len(row) > 15 else 22,
+                "ssh_user": row[16] if row[10] and len(row) > 16 else "",
+                "ssh_password": None,
+                "ssh_key_path": row[18] if row[10] and len(row) > 18 else "",
+                "connection_type": "odoo"
+            }
+            
+            # Decrypt Odoo password
+            if row[6]:
+                try:
+                    config["password"] = self.cipher_suite.decrypt(row[6].encode()).decode()
+                except:
+                    pass
+            
+            # Decrypt SSH password if exists
+            if row[10] and len(row) > 17 and row[17]:
+                try:
+                    config["ssh_password"] = self.cipher_suite.decrypt(row[17].encode()).decode()
+                except:
+                    pass
+            
+            return config
+        return None
+
+    def list_connections(self):
+        """List all saved connections from both tables with IDs"""
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        
+        # Get all connections with ID, name, and type info
+        all_connections = []
+        
+        # Get SSH connections
+        cursor.execute("SELECT id, name, host, port, username FROM ssh_connections ORDER BY name")
+        for row in cursor.fetchall():
+            all_connections.append({
+                'id': row[0],
+                'name': row[1],
+                'host': row[2],
+                'port': row[3],
+                'username': row[4],
+                'type': 'ssh'
+            })
+        
+        # Get Odoo connections  
+        cursor.execute("SELECT id, name, host, port, database, username FROM odoo_connections ORDER BY name")
+        for row in cursor.fetchall():
+            all_connections.append({
+                'id': row[0],
+                'name': row[1],
+                'host': row[2],
+                'port': row[3],
+                'database': row[4],
+                'username': row[5],
+                'type': 'odoo'
+            })
+        
+        conn.close()
+        return all_connections
+
+    def delete_ssh_connection(self, conn_id):
+        """Delete an SSH connection by ID"""
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        cursor.execute("DELETE FROM ssh_connections WHERE id = ?", (conn_id,))
+        conn.commit()
+        affected = cursor.rowcount > 0
+        conn.close()
+        return affected
+    
+    def delete_odoo_connection(self, conn_id):
+        """Delete an Odoo connection by ID"""
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        cursor.execute("DELETE FROM odoo_connections WHERE id = ?", (conn_id,))
+        conn.commit()
+        affected = cursor.rowcount > 0
+        conn.close()
+        return affected
+    
+    def get_setting(self, key, default=None):
+        """Get a setting value from the database"""
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        cursor.execute("SELECT value FROM settings WHERE key = ?", (key,))
+        result = cursor.fetchone()
+        conn.close()
+        return result[0] if result else default
+    
+    def set_setting(self, key, value):
+        """Set a setting value in the database"""
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            INSERT OR REPLACE INTO settings (key, value, updated_at)
+            VALUES (?, ?, CURRENT_TIMESTAMP)
+            """,
+            (key, value)
+        )
+        conn.commit()
+        conn.close()
+
+
+class OdooBackupRestore:
+    def __init__(self, progress_callback=None, log_callback=None, conn_manager=None):
+        self.timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        self.temp_dir = tempfile.mkdtemp(prefix="odoo_backup_")
+        self.progress_callback = progress_callback
+        self.log_callback = log_callback
+        self.conn_manager = conn_manager
+    
+    @staticmethod
+    def parse_odoo_conf(conf_path):
+        """Parse odoo.conf file and extract connection settings"""
+        if not os.path.exists(conf_path):
+            raise FileNotFoundError(f"Config file not found: {conf_path}")
+        
+        config = configparser.ConfigParser()
+        config.read(conf_path)
+        
+        # Get the main options section
+        if 'options' not in config:
+            raise ValueError("No 'options' section found in config file")
+        
+        options = config['options']
+        
+        # Extract connection details
+        connection_config = {
+            'host': options.get('db_host', 'localhost'),
+            'port': options.get('db_port', '5432'),
+            'database': options.get('db_name', 'False'),  # Odoo uses 'False' as default
+            'username': options.get('db_user', 'odoo'),
+            'password': options.get('db_password', 'False'),
+            'filestore_path': None,
+            'odoo_version': '17.0',  # Default version
+            'is_local': options.get('db_host', 'localhost') in ['localhost', '127.0.0.1']
+        }
+        
+        # Try to determine filestore path
+        data_dir = options.get('data_dir', None)
+        if data_dir and data_dir != 'False':
+            # If data_dir is specified, use it as the base filestore path
+            # The user should provide the full path to where filestore is located
+            connection_config['filestore_path'] = data_dir
+        else:
+            # Default Odoo filestore location 
+            # User should adjust this path as needed
+            connection_config['filestore_path'] = os.path.expanduser("~/.local/share/Odoo")
+        
+        # Clean up 'False' values
+        for key in ['database', 'password']:
+            if connection_config[key] == 'False':
+                connection_config[key] = ''
+        
+        return connection_config
+
+    def __del__(self):
+        # Cleanup temp directory
+        if hasattr(self, "temp_dir") and os.path.exists(self.temp_dir):
+            shutil.rmtree(self.temp_dir, ignore_errors=True)
+
+    def log(self, message, level="info"):
+        """Log message with callback support"""
+        print(message)
+        if self.log_callback:
+            self.log_callback(message, level)
+    
+    def _log(self, message, level="info"):
+        """Internal log method (alias for log)"""
+        self.log(message, level)
+
+    def update_progress(self, value, message=""):
+        """Update progress with callback support"""
+        if self.progress_callback:
+            self.progress_callback(value, message)
+
+    def run_command(self, command, shell=False, capture_output=True):
+        """Execute shell command and return output"""
+        try:
+            result = subprocess.run(
+                command,
+                shell=shell,
+                capture_output=capture_output,
+                text=True,
+                check=True,
+            )
+            return result.stdout
+        except subprocess.CalledProcessError as e:
+            self.log(f"Error executing command: {e}", "error")
+            self.log(f"Error output: {e.stderr}", "error")
+            raise
+
+    def check_dependencies(self):
+        """Check if required tools are installed"""
+        dependencies = ["pg_dump", "pg_restore", "psql", "tar"]
+        missing = []
+
+        for dep in dependencies:
+            if shutil.which(dep) is None:
+                missing.append(dep)
+
+        if missing:
+            error_msg = f"Missing dependencies: {', '.join(missing)}\nPlease install PostgreSQL client tools and tar"
+            self.log(error_msg, "error")
+            raise Exception(error_msg)
+
+    def test_connection(self, config):
+        """Test database connection and filestore path"""
+        messages = []
+        has_errors = False
+        
+        # Test database connection
+        env = os.environ.copy()
+        if config.get("db_password"):
+            env["PGPASSWORD"] = config["db_password"]
+
+        try:
+            cmd = [
+                "psql",
+                "-h",
+                config["db_host"],
+                "-p",
+                str(config["db_port"]),
+                "-U",
+                config["db_user"],
+                "-d",
+                "postgres",
+                "-c",
+                "SELECT version();",
+            ]
+
+            result = subprocess.run(
+                cmd, env=env, capture_output=True, text=True, timeout=5
+            )
+            
+            if result.returncode == 0:
+                messages.append("✓ Database connection successful")
+            else:
+                messages.append(f"✗ Database connection failed: {result.stderr}")
+                has_errors = True
+                
+        except Exception as e:
+            messages.append(f"✗ Database connection error: {str(e)}")
+            has_errors = True
+        
+        # Test filestore path if provided
+        filestore_path = config.get("filestore_path")
+        if filestore_path:
+            # Check if using SSH
+            if config.get("use_ssh") and config.get("ssh_connection_id"):
+                # Test remote filestore path
+                try:
+                    ssh_conn = self.conn_manager.get_ssh_connection(config["ssh_connection_id"])
+                    if ssh_conn:
+                        import paramiko
+                        ssh = paramiko.SSHClient()
+                        ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+                        
+                        connect_kwargs = {
+                            "hostname": ssh_conn["host"],
+                            "port": ssh_conn.get("port", 22),
+                            "username": ssh_conn["username"],
+                        }
+                        
+                        if ssh_conn.get("key_path"):
+                            connect_kwargs["key_filename"] = ssh_conn["key_path"]
+                        elif ssh_conn.get("password"):
+                            connect_kwargs["password"] = ssh_conn["password"]
+                        
+                        ssh.connect(**connect_kwargs)
+                        
+                        # Check if the filestore path exists
+                        stdin, stdout, stderr = ssh.exec_command(f"test -d '{filestore_path}'")
+                        if stdout.channel.recv_exit_status() == 0:
+                            messages.append(f"✓ Remote filestore path exists: {filestore_path}")
+                        else:
+                            # Try with database name appended
+                            db_name = config.get("db_name", "")
+                            if db_name:
+                                full_path = os.path.join(filestore_path, "filestore", db_name)
+                                stdin, stdout, stderr = ssh.exec_command(f"test -d '{full_path}'")
+                                if stdout.channel.recv_exit_status() == 0:
+                                    messages.append(f"✓ Remote filestore path exists: {full_path}")
+                                else:
+                                    messages.append(f"⚠ Remote filestore path not found: {filestore_path} or {full_path}")
+                            else:
+                                messages.append(f"⚠ Remote filestore path not found: {filestore_path}")
+                        
+                        ssh.close()
+                    else:
+                        messages.append("⚠ SSH connection not found for filestore test")
+                except Exception as e:
+                    messages.append(f"⚠ Could not test remote filestore: {str(e)}")
+            else:
+                # Test local filestore path
+                if os.path.exists(filestore_path):
+                    messages.append(f"✓ Local filestore path exists: {filestore_path}")
+                else:
+                    # Try with database name appended
+                    db_name = config.get("db_name", "")
+                    if db_name:
+                        full_path = os.path.join(filestore_path, "filestore", db_name)
+                        if os.path.exists(full_path):
+                            messages.append(f"✓ Local filestore path exists: {full_path}")
+                        else:
+                            messages.append(f"⚠ Local filestore path not found: {filestore_path} or {full_path}")
+                    else:
+                        messages.append(f"⚠ Local filestore path not found: {filestore_path}")
+        
+        # Return combined result
+        return not has_errors, "\n".join(messages)
+
+    def check_remote_disk_space(self, ssh, path, estimated_size_mb):
+        """Check if remote server has enough disk space for backup"""
+        try:
+            # Get available space in /tmp
+            stdin, stdout, stderr = ssh.exec_command("df -BM /tmp | tail -1 | awk '{print $4}'")
+            available_space = stdout.read().decode().strip()
+            # Remove 'M' suffix and convert to integer
+            available_mb = int(available_space.rstrip('M'))
+            
+            # Add 20% safety margin to estimated size
+            required_mb = int(estimated_size_mb * 1.2)
+            
+            if available_mb < required_mb:
+                return False, available_mb, required_mb
+            return True, available_mb, required_mb
+        except Exception as e:
+            self.log(f"Warning: Could not check disk space: {e}", "warning")
+            return True, 0, 0  # Proceed anyway if check fails
+    
+    def estimate_compressed_size(self, ssh, path, is_database=False):
+        """Estimate compressed size of a directory or database"""
+        try:
+            if is_database:
+                # For database, get the database size from PostgreSQL
+                return 100  # Default estimate for database
+            else:
+                # For filestore, get directory size
+                stdin, stdout, stderr = ssh.exec_command(f"du -sm '{path}' | cut -f1")
+                size_mb = int(stdout.read().decode().strip())
+                # Estimate compression ratio (typically 30-50% for filestore)
+                compressed_estimate = size_mb * 0.4
+                return compressed_estimate
+        except Exception as e:
+            self.log(f"Warning: Could not estimate size: {e}", "warning")
+            return 100  # Default conservative estimate
+
+    def backup_database(self, config):
+        """Backup PostgreSQL database"""
+        self.log(f"Backing up database: {config['db_name']}...")
+        self.update_progress(20, "Backing up database...")
+
+        # Build pg_dump command
+        dump_file = os.path.join(self.temp_dir, f"{config['db_name']}.sql")
+
+        env = os.environ.copy()
+        if config.get("db_password"):
+            env["PGPASSWORD"] = config["db_password"]
+
+        cmd = [
+            "pg_dump",
+            "-h",
+            config["db_host"],
+            "-p",
+            str(config["db_port"]),
+            "-U",
+            config["db_user"],
+            "-d",
+            config["db_name"],
+            "-f",
+            dump_file,
+            "--no-owner",
+            "--no-acl",
+        ]
+
+        if config.get("verbose"):
+            cmd.append("-v")
+
+        subprocess.run(cmd, env=env, check=True)
+        self.log(f"Database backed up successfully")
+        self.update_progress(40, "Database backup complete")
+        return dump_file
+
+    def backup_filestore(self, config):
+        """Backup Odoo filestore"""
+        filestore_path = config["filestore_path"]
+        
+        if not filestore_path:
+            self.log("Warning: Filestore path not specified", "warning")
+            return None
+
+        # Check if we need to use SSH
+        if config.get("use_ssh") and config.get("ssh_connection_id"):
+            # Get SSH connection details
+            ssh_conn = self.conn_manager.get_ssh_connection(config["ssh_connection_id"])
+            if not ssh_conn:
+                self.log("Error: SSH connection not found", "error")
+                return None
+            
+            self.log(f"Backing up remote filestore via SSH: {filestore_path}...")
+            self.update_progress(50, "Backing up remote filestore...")
+            
+            try:
+                import paramiko
+                ssh = paramiko.SSHClient()
+                ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+                
+                # Connect to SSH
+                connect_kwargs = {
+                    "hostname": ssh_conn["host"],
+                    "port": ssh_conn.get("port", 22),
+                    "username": ssh_conn["username"],
+                }
+                
+                if ssh_conn.get("key_path"):
+                    connect_kwargs["key_filename"] = ssh_conn["key_path"]
+                elif ssh_conn.get("password"):
+                    connect_kwargs["password"] = ssh_conn["password"]
+                
+                ssh.connect(**connect_kwargs)
+                
+                # Create remote tar archive
+                archive_name = os.path.join(self.temp_dir, "filestore.tar.gz")
+                remote_temp = f"/tmp/filestore_{self.timestamp}.tar.gz"
+                
+                # Create tar on remote server
+                # For Odoo, the filestore path should include the database name subdirectory
+                # Check if the path exists first, if not try appending the database name
+                self.log("Checking remote filestore path...")
+                
+                # First check if the path exists as-is
+                stdin, stdout, stderr = ssh.exec_command(f"test -d '{filestore_path}'")
+                if stdout.channel.recv_exit_status() != 0:
+                    # Path doesn't exist, try with database name appended
+                    db_name = config.get("db_name", "")
+                    if db_name:
+                        filestore_path = os.path.join(filestore_path, "filestore", db_name)
+                        self.log(f"Adjusted filestore path to: {filestore_path}")
+                
+                # Estimate compressed size
+                self.log("Estimating backup size...")
+                estimated_size = self.estimate_compressed_size(ssh, filestore_path, is_database=False)
+                
+                # Check disk space
+                has_space, available_mb, required_mb = self.check_remote_disk_space(ssh, "/tmp", estimated_size)
+                
+                if not has_space:
+                    error_msg = f"Insufficient disk space on remote server!\n"
+                    error_msg += f"Available: {available_mb}MB, Required: {required_mb}MB\n"
+                    error_msg += f"Please free up space in /tmp on the remote server."
+                    self.log(error_msg, "error")
+                    ssh.close()
+                    raise Exception(error_msg)
+                
+                self.log(f"Disk space check passed (Available: {available_mb}MB, Required: {required_mb}MB)")
+                self.log("Creating remote archive...")
+                
+                stdin, stdout, stderr = ssh.exec_command(
+                    f"cd '{filestore_path}' && tar -czf {remote_temp} ."
+                )
+                exit_status = stdout.channel.recv_exit_status()
+                
+                if exit_status != 0:
+                    error_msg = stderr.read().decode()
+                    self.log(f"Error creating remote archive: {error_msg}", "error")
+                    ssh.close()
+                    return None
+                
+                try:
+                    # Download the archive via SFTP
+                    self.log("Downloading filestore archive...")
+                    sftp = ssh.open_sftp()
+                    sftp.get(remote_temp, archive_name)
+                    sftp.close()
+                    
+                    self.log("Remote filestore backed up successfully")
+                    self.update_progress(70, "Filestore backup complete")
+                    return archive_name
+                    
+                finally:
+                    # Always clean up remote temp file, even if download fails
+                    self.log("Cleaning up remote temporary files...")
+                    ssh.exec_command(f"rm -f {remote_temp}")
+                    ssh.close()
+                
+            except Exception as e:
+                self.log(f"Error backing up remote filestore: {str(e)}", "error")
+                return None
+        else:
+            # Local filestore backup
+            if not os.path.exists(filestore_path):
+                self.log(
+                    f"Warning: Local filestore path does not exist: {filestore_path}",
+                    "warning",
+                )
+                return None
+            
+            self.log(f"Backing up local filestore: {filestore_path}...")
+            self.update_progress(50, "Backing up filestore...")
+
+            # Create tar archive of filestore
+            archive_name = os.path.join(self.temp_dir, "filestore.tar.gz")
+            with tarfile.open(archive_name, "w:gz") as tar:
+                tar.add(filestore_path, arcname="filestore")
+
+            self.log(f"Filestore backed up successfully")
+            self.update_progress(70, "Filestore backup complete")
+            return archive_name
+
+    def create_backup_archive(self, config, db_dump, filestore_archive):
+        """Create combined backup archive"""
+        backup_name = f"odoo_backup_{config['db_name']}_{self.timestamp}.tar.gz"
+        backup_path = os.path.join(config.get("backup_dir", self.temp_dir), backup_name)
+
+        self.log(f"Creating backup archive: {backup_name}...")
+        self.update_progress(80, "Creating archive...")
+
+        # Create metadata file
+        metadata = {
+            "timestamp": self.timestamp,
+            "db_name": config["db_name"],
+            "odoo_version": config.get("odoo_version", "unknown"),
+            "has_filestore": filestore_archive is not None,
+        }
+
+        metadata_file = os.path.join(self.temp_dir, "metadata.json")
+        with open(metadata_file, "w") as f:
+            json.dump(metadata, f, indent=2)
+
+        # Create combined archive
+        with tarfile.open(backup_path, "w:gz") as tar:
+            tar.add(db_dump, arcname=os.path.basename(db_dump))
+            tar.add(metadata_file, arcname="metadata.json")
+            if filestore_archive:
+                tar.add(filestore_archive, arcname=os.path.basename(filestore_archive))
+
+        self.log(f"✅ Backup complete: {backup_path}", "success")
+        self.update_progress(90, "Backup archive created")
+        return backup_path
+
+    def extract_backup(self, backup_file):
+        """Extract backup archive"""
+        self.log(f"Extracting backup: {os.path.basename(backup_file)}...")
+        self.update_progress(10, "Extracting backup...")
+
+        extract_dir = os.path.join(self.temp_dir, "extract")
+        os.makedirs(extract_dir, exist_ok=True)
+
+        # Try to detect actual file type regardless of extension
+        import zipfile
+        
+        # First try as zip (since some .tar.gz files might actually be zips)
+        try:
+            with zipfile.ZipFile(backup_file, 'r') as zf:
+                self.log("Detected ZIP format, extracting...")
+                zf.extractall(extract_dir)
+        except zipfile.BadZipFile:
+            # Not a zip, try tar.gz
+            try:
+                with tarfile.open(backup_file, "r:gz") as tar:
+                    self.log("Detected TAR.GZ format, extracting...")
+                    tar.extractall(extract_dir)
+            except tarfile.ReadError:
+                # Try regular tar
+                try:
+                    with tarfile.open(backup_file, "r") as tar:
+                        self.log("Detected TAR format, extracting...")
+                        tar.extractall(extract_dir)
+                except:
+                    raise Exception(f"Unable to extract {backup_file}. File format not recognized. Tried ZIP, TAR.GZ, and TAR formats.")
+
+        # Read metadata
+        metadata_file = os.path.join(extract_dir, "metadata.json")
+        if os.path.exists(metadata_file):
+            with open(metadata_file, "r") as f:
+                metadata = json.load(f)
+        else:
+            metadata = {}
+
+        # Find files
+        files = os.listdir(extract_dir)
+        db_dump = None
+        filestore_archive = None
+
+        for file in files:
+            if file.endswith(".sql"):
+                db_dump = os.path.join(extract_dir, file)
+            elif file == "filestore.tar.gz":
+                filestore_archive = os.path.join(extract_dir, file)
+
+        self.update_progress(20, "Backup extracted")
+        return db_dump, filestore_archive, metadata
+
+    def restore_database(self, config, db_dump):
+        """Restore PostgreSQL database"""
+        try:
+            self.log(f"Restoring database: {config['db_name']}...")
+            self.update_progress(30, "Restoring database...")
+
+            env = os.environ.copy()
+            if config.get("db_password"):
+                env["PGPASSWORD"] = config["db_password"]
+
+            # Check if database exists
+            check_cmd = [
+                "psql",
+                "-h",
+                config["db_host"],
+                "-p",
+                str(config["db_port"]),
+                "-U",
+                config["db_user"],
+                "-lqt",
+            ]
+
+            result = subprocess.run(check_cmd, env=env, capture_output=True, text=True)
+            db_exists = config["db_name"] in result.stdout
+
+            if db_exists:
+                # Always drop and recreate the database
+                self.log(f"Dropping existing database: {config['db_name']}...")
+                # Terminate connections
+                terminate_cmd = f"""
+                    SELECT pg_terminate_backend(pid) 
+                    FROM pg_stat_activity 
+                    WHERE datname = '{config['db_name']}' AND pid <> pg_backend_pid();
+                """
+                subprocess.run(
+                    [
+                        "psql",
+                        "-h",
+                        config["db_host"],
+                        "-p",
+                        str(config["db_port"]),
+                        "-U",
+                        config["db_user"],
+                        "-d",
+                        "postgres",
+                        "-c",
+                        terminate_cmd,
+                    ],
+                    env=env,
+                    capture_output=True,
+                )
+
+                # Drop database
+                drop_cmd = [
+                    "dropdb",
+                    "-h",
+                    config["db_host"],
+                    "-p",
+                    str(config["db_port"]),
+                    "-U",
+                    config["db_user"],
+                    config["db_name"],
+                ]
+                subprocess.run(drop_cmd, env=env, check=True)
+
+            # Create database
+            self.log(f"Creating database: {config['db_name']}...")
+            create_cmd = [
+                "createdb",
+                "-h",
+                config["db_host"],
+                "-p",
+                str(config["db_port"]),
+                "-U",
+                config["db_user"],
+                config["db_name"],
+            ]
+            subprocess.run(create_cmd, env=env, check=True)
+
+            # Restore database
+            self.update_progress(50, "Importing database data...")
+            
+            # Check if db_dump is a file path or bytes
+            if isinstance(db_dump, str) and os.path.exists(db_dump):
+                # It's a file path, use -f flag
+                restore_cmd = [
+                    "psql",
+                    "-h",
+                    config["db_host"],
+                    "-p",
+                    str(config["db_port"]),
+                    "-U",
+                    config["db_user"],
+                    "-d",
+                    config["db_name"],
+                    "-f",
+                    db_dump,
+                ]
+                if not config.get("verbose"):
+                    restore_cmd.extend(["-q"])
+                subprocess.run(restore_cmd, env=env, check=True)
+                
+                self.log(f"Database restored successfully")
+                self.update_progress(70, "Database restore complete")
+                return True
+                
+            else:
+                # It's bytes data, pipe through stdin
+                restore_cmd = [
+                    "psql",
+                    "-h",
+                    config["db_host"],
+                    "-p",
+                    str(config["db_port"]),
+                    "-U",
+                    config["db_user"],
+                    "-d",
+                    config["db_name"],
+                ]
+                if not config.get("verbose"):
+                    restore_cmd.extend(["-q"])
+                
+                # If db_dump is bytes, use it directly. If it's a string path, read the file
+                if isinstance(db_dump, bytes):
+                    input_data = db_dump
+                else:
+                    with open(db_dump, 'rb') as f:
+                        input_data = f.read()
+                
+                subprocess.run(restore_cmd, env=env, input=input_data, check=True)
+                
+                self.log(f"Database restored successfully")
+                self.update_progress(70, "Database restore complete")
+                return True
+            
+        except subprocess.CalledProcessError as e:
+            self.log(f"Database restore failed: {str(e)}", "error")
+            return False
+        except Exception as e:
+            self.log(f"Database restore error: {str(e)}", "error")
+            return False
+
+    def restore_filestore(self, config, filestore_archive):
+        """Restore Odoo filestore"""
+        if not filestore_archive:
+            self.log("No filestore archive found in backup", "warning")
+            return
+
+        # Construct the full filestore path for this database
+        base_path = config["filestore_path"]
+        db_name = config["db_name"]
+        
+        # Check if the path already includes 'filestore' and the database name
+        if base_path.endswith(db_name):
+            # Path already includes database name
+            filestore_path = base_path
+        elif 'filestore' in base_path:
+            # Path includes filestore but not database name
+            filestore_path = os.path.join(base_path, db_name)
+        else:
+            # Path is the base directory, add filestore/db_name
+            filestore_path = os.path.join(base_path, "filestore", db_name)
+        
+        self.log(f"Restoring filestore to: {filestore_path}...")
+        self.update_progress(80, "Restoring filestore...")
+
+        # Backup existing filestore if it exists
+        if os.path.exists(filestore_path):
+            # Always backup and replace existing filestore
+            backup_path = f"{filestore_path}.bak.{self.timestamp}"
+            self.log(f"Moving existing filestore to: {backup_path}")
+            shutil.move(filestore_path, backup_path)
+
+        # Create the target filestore directory
+        parent_dir = os.path.dirname(filestore_path)
+        os.makedirs(parent_dir, exist_ok=True)
+        os.makedirs(filestore_path, exist_ok=True)
+        
+        # Extract directly to the filestore path
+        with tarfile.open(filestore_archive, "r:gz") as tar:
+            tar.extractall(filestore_path)
+
+        self.log(f"Filestore restored successfully")
+        self.update_progress(95, "Filestore restore complete")
+        return True
+
+    def backup(self, config):
+        """Create a complete backup (database + filestore) and return the zip file path"""
+        try:
+            self._log(f"Starting backup of {config['db_name']}...", "info")
+            
+            # Create temp directory for this backup
+            backup_dir = os.path.join(self.temp_dir, f"backup_{config['db_name']}_{self.timestamp}")
+            os.makedirs(backup_dir, exist_ok=True)
+            
+            # Backup database
+            if not config.get('filestore_only', False):
+                self._log("Backing up database...", "info")
+                db_dump_file = self.backup_database(config)
+                if db_dump_file:
+                    # Read the dump file and save to backup dir
+                    db_path = os.path.join(backup_dir, "database.sql")
+                    with open(db_dump_file, 'rb') as src:
+                        with open(db_path, 'wb') as dst:
+                            dst.write(src.read())
+                    self._log("Database backup completed", "success")
+                else:
+                    self._log("Database backup failed", "error")
+                    return None
+            
+            # Backup filestore
+            if not config.get('db_only', False) and config.get('filestore_path'):
+                self._log("Backing up filestore...", "info")
+                filestore_archive = self.backup_filestore(config)
+                if filestore_archive:
+                    # Read the filestore archive and save to backup dir
+                    filestore_path = os.path.join(backup_dir, "filestore.tar.gz")
+                    with open(filestore_archive, 'rb') as src:
+                        with open(filestore_path, 'wb') as dst:
+                            dst.write(src.read())
+                    self._log("Filestore backup completed", "success")
+            
+            # Create final zip archive
+            zip_path = os.path.join(self.temp_dir, f"{config['db_name']}_backup_{self.timestamp}.zip")
+            self._log(f"Creating archive: {zip_path}", "info")
+            
+            import zipfile
+            with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as zipf:
+                for root, dirs, files in os.walk(backup_dir):
+                    for file in files:
+                        file_path = os.path.join(root, file)
+                        arcname = os.path.relpath(file_path, backup_dir)
+                        zipf.write(file_path, arcname)
+            
+            self._log(f"Backup completed: {zip_path}", "success")
+            return zip_path
+            
+        except Exception as e:
+            self._log(f"Backup failed: {str(e)}", "error")
+            return None
+    
+    def restore(self, config, backup_file):
+        """Restore from a backup archive file"""
+        try:
+            
+            # Extract backup archive
+            extract_dir = os.path.join(self.temp_dir, f"restore_{self.timestamp}")
+            os.makedirs(extract_dir, exist_ok=True)
+            
+            # Try to detect actual file type regardless of extension
+            import zipfile
+            import tarfile
+            
+            # First try as zip (since some .tar.gz files might actually be zips)
+            try:
+                with zipfile.ZipFile(backup_file, 'r') as zipf:
+                    self._log("Detected ZIP format, extracting...", "info")
+                    zipf.extractall(extract_dir)
+            except zipfile.BadZipFile:
+                # Not a zip, try tar.gz
+                try:
+                    with tarfile.open(backup_file, 'r:gz') as tar:
+                        self._log("Detected TAR.GZ format, extracting...", "info")
+                        tar.extractall(extract_dir)
+                except tarfile.ReadError:
+                    # Try regular tar
+                    try:
+                        with tarfile.open(backup_file, 'r') as tar:
+                            self._log("Detected TAR format, extracting...", "info")
+                            tar.extractall(extract_dir)
+                    except Exception as e:
+                        raise Exception(f"Unable to extract {backup_file}. File format not recognized. Tried ZIP, TAR.GZ, and TAR formats.")
+            
+            # Check what's in the backup
+            has_database = os.path.exists(os.path.join(extract_dir, "database.sql"))
+            has_filestore = os.path.exists(os.path.join(extract_dir, "filestore.tar.gz"))
+            
+            # Restore database
+            if has_database and not config.get('filestore_only', False):
+                self._log("Restoring database...", "info")
+                # Pass the file path directly instead of reading into memory
+                db_dump_path = os.path.join(extract_dir, "database.sql")
+                success = self.restore_database(config, db_dump_path)
+                if not success:
+                    self._log("Database restore failed", "error")
+                    return False
+            
+            # Restore filestore
+            if has_filestore and not config.get('db_only', False) and config.get('filestore_path'):
+                self._log("Restoring filestore...", "info")
+                # Pass the file path directly instead of reading into memory
+                filestore_archive_path = os.path.join(extract_dir, "filestore.tar.gz")
+                success = self.restore_filestore(config, filestore_archive_path)
+                if not success:
+                    self._log("Filestore restore failed", "error")
+                    return False
+            
+            return True
+            
+        except Exception as e:
+            self._log(f"Restore failed: {str(e)}", "error")
+            return False
+
+    def backup_and_restore(self, source_config, dest_config):
+        """Perform backup from source and restore to destination in one operation"""
+        self.update_progress(0, "Starting backup and restore...")
+
+        try:
+            # Step 1: Backup from source
+            self.log("=== BACKING UP FROM SOURCE ===", "info")
+            self.log(
+                f"Source: {source_config['db_host']}:{source_config['db_port']}/{source_config['db_name']}"
+            )
+
+            # Test source connection
+            success, msg = self.test_connection(source_config)
+            if not success:
+                raise Exception(f"Source connection failed: {msg}")
+
+            # Perform backup
+            db_dump = self.backup_database(source_config)
+            filestore_archive = None
+
+            if not source_config.get("db_only") and source_config.get("filestore_path"):
+                filestore_archive = self.backup_filestore(source_config)
+
+            # Step 2: Restore to destination
+            self.log("\n=== RESTORING TO DESTINATION ===", "info")
+            self.log(
+                f"Destination: {dest_config['db_host']}:{dest_config['db_port']}/{dest_config['db_name']}"
+            )
+
+            # Test destination connection
+            success, msg = self.test_connection(dest_config)
+            if not success:
+                raise Exception(f"Destination connection failed: {msg}")
+
+            # Restore database
+            if not dest_config.get("filestore_only"):
+                self.restore_database(dest_config, db_dump)
+
+            # Restore filestore
+            if (
+                not dest_config.get("db_only")
+                and filestore_archive
+                and dest_config.get("filestore_path")
+            ):
+                self.restore_filestore(dest_config, filestore_archive)
+
+            # Optionally save backup archive
+            if source_config.get("save_backup"):
+                backup_file = self.create_backup_archive(
+                    source_config, db_dump, filestore_archive
+                )
+                self.log(f"\n📦 Backup saved to: {backup_file}", "success")
+
+            self.log(f"\n✅ Backup and restore completed successfully!", "success")
+            self.update_progress(100, "Complete!")
+
+            return True
+
+        except Exception as e:
+            self.log(f"\n❌ Operation failed: {str(e)}", "error")
+            raise
+
 
 class OdooBackupRestoreGUI:
     """GUI interface for Odoo Backup/Restore - only loaded if tkinter is available"""
 
     def __init__(self, root):
         self.root = root
-        self.root.title("Odoo Backup & Restore Manager")
+        self.root.title("Odoo Backup & Restore Tool with Connection Manager")
         # Let tkinter auto-size the window based on content
         # Set minimum size to prevent window from being too small
         self.root.minsize(800, 600)
@@ -52,7 +1437,6 @@ class OdooBackupRestoreGUI:
         self.create_backup_restore_tab()
         self.create_backup_files_tab()
         self.create_connections_tab()
-        self.create_help_tab()
         
         # Auto-size window to content after all widgets are created
         self.auto_size_window()
@@ -83,24 +1467,16 @@ class OdooBackupRestoreGUI:
     
     def load_config(self):
         """Load configuration from database"""
-        # Set default backup directory to ~/Documents/OdooBackups
-        default_backup_dir = os.path.expanduser("~/Documents/OdooBackups")
-        
-        # Get backup directory from database, default to ~/Documents/OdooBackups
-        self.backup_directory = self.conn_manager.get_setting('backup_directory', default_backup_dir)
+        # Get backup directory from database, default to current directory
+        self.backup_directory = self.conn_manager.get_setting('backup_directory', os.getcwd())
         
         # Ensure the directory exists
         if not os.path.exists(self.backup_directory):
             try:
                 os.makedirs(self.backup_directory, exist_ok=True)
-            except Exception as e:
-                # If can't create, try the default
-                try:
-                    os.makedirs(default_backup_dir, exist_ok=True)
-                    self.backup_directory = default_backup_dir
-                except:
-                    # Last resort: fall back to home directory
-                    self.backup_directory = os.path.expanduser("~")
+            except:
+                # If can't create, fall back to current directory
+                self.backup_directory = os.getcwd()
                 self.conn_manager.set_setting('backup_directory', self.backup_directory)
     
     def save_config(self):
@@ -229,7 +1605,7 @@ class OdooBackupRestoreGUI:
 
         self.db_only = tk.BooleanVar()
         self.filestore_only = tk.BooleanVar()
-        self.neutralize = tk.BooleanVar()
+        self.verbose = tk.BooleanVar()
 
         ttk.Checkbutton(
             options_frame, text="Database Only", variable=self.db_only
@@ -237,15 +1613,9 @@ class OdooBackupRestoreGUI:
         ttk.Checkbutton(
             options_frame, text="Filestore Only", variable=self.filestore_only
         ).pack(side="left", padx=10)
-        
-        # Neutralize option with tooltip
-        neutralize_check = ttk.Checkbutton(
-            options_frame, text="Neutralize (Restore Only)", variable=self.neutralize
-        )
-        neutralize_check.pack(side="left", padx=10)
-        
-        # Add tooltip to explain neutralization
-        # Note: Neutralization will disable emails, crons, and set safe defaults
+        ttk.Checkbutton(
+            options_frame, text="Verbose Output", variable=self.verbose
+        ).pack(side="left", padx=10)
 
         # Progress
         progress_frame = ttk.Frame(main_container)
@@ -652,171 +2022,6 @@ class OdooBackupRestoreGUI:
             except Exception as e:
                 messagebox.showerror("Error", f"Failed to delete file: {str(e)}")
     
-    def create_help_tab(self):
-        """Create the Help tab with documentation"""
-        tab = ttk.Frame(self.notebook)
-        self.notebook.add(tab, text="Help")
-        
-        # Create scrollable text widget
-        main_frame = ttk.Frame(tab, padding="10")
-        main_frame.pack(fill="both", expand=True)
-        
-        # Create text widget with scrollbar
-        text_frame = ttk.Frame(main_frame)
-        text_frame.pack(fill="both", expand=True)
-        
-        # Scrollbar
-        scrollbar = ttk.Scrollbar(text_frame)
-        scrollbar.pack(side="right", fill="y")
-        
-        # Text widget
-        help_text = tk.Text(text_frame, wrap="word", yscrollcommand=scrollbar.set, 
-                           font=("TkDefaultFont", 10), padx=10, pady=10)
-        help_text.pack(side="left", fill="both", expand=True)
-        scrollbar.config(command=help_text.yview)
-        
-        # Add help content
-        help_content = """
-ODOO BACKUP MANAGER - HELP GUIDE
-=================================
-
-OVERVIEW
---------
-This tool provides comprehensive backup and restore capabilities for Odoo databases and filestores.
-It supports both local and remote operations via SSH connections.
-
-OPERATION MODES
----------------
-• Backup & Restore: Copy data from source to destination in one operation
-• Backup Only: Create a backup archive file (.tar.gz)
-• Restore Only: Restore from an existing backup archive
-
-DATABASE NEUTRALIZATION
------------------------
-When restoring a database, you can enable the "Neutralize" option to make it safe for testing.
-This feature is crucial when restoring production data to test/development environments.
-
-What Gets Neutralized:
-• All outgoing mail servers - Disabled to prevent sending emails
-• All scheduled actions (crons) - Disabled to prevent automated tasks
-• Admin password - Reset to 'admin' for easy access
-• All user passwords - Reset to 'demo' (except admin and system users)
-• Payment acquirers - Disabled to prevent payment processing
-• Email queue - Cleared of any pending/failed emails
-• Website indexing - Robots.txt set to disallow all crawlers
-• Company names - Prefixed with [TEST] to identify as test environment
-
-⚠️ WARNING: Neutralization modifies the database. Only use on test/development systems!
-
-CONNECTIONS
------------
-Database Connections:
-• Configure PostgreSQL connection details
-• Test connections before operations
-• Set filestore paths for complete backups
-• Mark connections as "Allow Restore" to enable restore operations
-
-SSH Connections:
-• Configure SSH access for remote servers
-• Use SSH key authentication (recommended) or password
-• Required for remote filestore operations
-
-BACKUP FILES
-------------
-• View all backup files in your configured directory
-• Double-click to view backup details
-• Delete old backups to save space
-• Files are named with timestamp: backup_YYYYMMDD_HHMMSS.tar.gz
-
-BACKUP STRUCTURE
-----------------
-Each backup archive contains:
-• database.sql - PostgreSQL dump of the database
-• filestore.tar.gz - Compressed Odoo filestore (if included)
-• metadata.json - Backup information and version details
-
-BEST PRACTICES
---------------
-1. Always test connections before running operations
-2. Enable "Neutralize" when restoring to non-production environments
-3. Keep regular backups and test restore procedures
-4. Use SSH keys instead of passwords for remote connections
-5. Monitor available disk space before large operations
-6. Verify Odoo version compatibility when restoring
-
-TROUBLESHOOTING
----------------
-Connection Failed:
-• Verify host, port, and credentials
-• Check network connectivity
-• Ensure PostgreSQL is accepting connections
-• For SSH: verify key permissions (600)
-
-Backup Failed:
-• Check disk space on backup destination
-• Verify database and filestore paths
-• Ensure proper permissions
-
-Restore Failed:
-• Confirm target database doesn't exist or can be dropped
-• Check available disk space
-• Verify backup file integrity
-• Ensure matching Odoo versions
-
-KEYBOARD SHORTCUTS
-------------------
-• F5 - Refresh connections/files lists
-• Delete - Remove selected item (with confirmation)
-• Enter - View details of selected item
-
-SAFETY FEATURES
----------------
-• Connections must explicitly allow restore operations
-• Confirmation dialogs for destructive operations
-• Progress indication for long-running tasks
-• Detailed logging of all operations
-• Automatic backup file verification
-
-For more information or to report issues, visit:
-https://github.com/jpsteil/odoo-backup-manager
-"""
-        
-        help_text.insert("1.0", help_content)
-        
-        # Make text read-only
-        help_text.config(state="disabled")
-        
-        # Configure tags for formatting
-        help_text.tag_configure("heading", font=("TkDefaultFont", 12, "bold"))
-        help_text.tag_configure("subheading", font=("TkDefaultFont", 10, "bold"))
-        help_text.tag_configure("warning", foreground="orange", font=("TkDefaultFont", 10, "bold"))
-        
-        # Apply formatting tags (in disabled state we need to temporarily enable)
-        help_text.config(state="normal")
-        
-        # Apply heading tags
-        for pattern in ["ODOO BACKUP MANAGER - HELP GUIDE", "OVERVIEW", "OPERATION MODES", 
-                       "DATABASE NEUTRALIZATION", "CONNECTIONS", "BACKUP FILES", 
-                       "BACKUP STRUCTURE", "BEST PRACTICES", "TROUBLESHOOTING", 
-                       "KEYBOARD SHORTCUTS", "SAFETY FEATURES"]:
-            start = "1.0"
-            while True:
-                pos = help_text.search(pattern, start, stopindex="end")
-                if not pos:
-                    break
-                end = f"{pos}+{len(pattern)}c"
-                help_text.tag_add("heading" if pattern == "ODOO BACKUP MANAGER - HELP GUIDE" else "subheading", pos, end)
-                start = end
-        
-        # Apply warning tag
-        start = "1.0"
-        pos = help_text.search("⚠️ WARNING:", start, stopindex="end")
-        if pos:
-            end = help_text.search("\n", pos, stopindex="end")
-            help_text.tag_add("warning", pos, end)
-        
-        help_text.config(state="disabled")
-    
     def add_odoo_connection_dialog(self):
         """Show dialog to add a new Odoo database connection"""
         dialog = tk.Toplevel(self.root)
@@ -896,18 +2101,6 @@ https://github.com/jpsteil/odoo-backup-manager
         ttk.Checkbutton(
             details_frame, text="Local Development Connection", variable=fields["is_local"]
         ).grid(row=row, column=1, sticky="w", pady=5)
-        row += 1
-        
-        # Allow Restore checkbox (default to False for safety)
-        fields["allow_restore"] = tk.BooleanVar(value=False)
-        allow_restore_check = ttk.Checkbutton(
-            details_frame, 
-            text="Allow Restore Operations (⚠️ Be careful with production databases!)", 
-            variable=fields["allow_restore"]
-        )
-        allow_restore_check.grid(row=row, column=1, sticky="w", pady=5)
-        # Change checkbox color to indicate danger
-        allow_restore_check.configure(style="Danger.TCheckbutton")
         
         # Configure column to expand
         details_frame.columnconfigure(1, weight=1)
@@ -974,7 +2167,6 @@ https://github.com/jpsteil/odoo-backup-manager
                 "filestore_path": fields["filestore_path"].get(),
                 "odoo_version": fields["odoo_version"].get(),
                 "is_local": fields["is_local"].get(),
-                "allow_restore": fields["allow_restore"].get(),  # Include allow_restore flag
                 "use_ssh": fields["use_ssh"].get(),
             }
             
@@ -1586,16 +2778,6 @@ https://github.com/jpsteil/odoo-backup-manager
         ttk.Checkbutton(
             details_frame, text="Local Development Connection", variable=fields["is_local"]
         ).grid(row=row, column=1, sticky="w", pady=5)
-        row += 1
-        
-        # Allow Restore checkbox
-        fields["allow_restore"] = tk.BooleanVar(value=conn.get("allow_restore", False))
-        allow_restore_check = ttk.Checkbutton(
-            details_frame, 
-            text="Allow Restore Operations (⚠️ Be careful with production databases!)", 
-            variable=fields["allow_restore"]
-        )
-        allow_restore_check.grid(row=row, column=1, sticky="w", pady=5)
         
         # Configure column to expand
         details_frame.columnconfigure(1, weight=1)
@@ -1673,7 +2855,6 @@ https://github.com/jpsteil/odoo-backup-manager
                 "filestore_path": fields["filestore_path"].get(),
                 "odoo_version": fields["odoo_version"].get(),
                 "is_local": fields["is_local"].get(),
-                "allow_restore": fields["allow_restore"].get(),  # Include allow_restore flag
                 "use_ssh": fields["use_ssh"].get(),
             }
             
@@ -2065,20 +3246,14 @@ https://github.com/jpsteil/odoo-backup-manager
         # Filter only Odoo connections for backup/restore
         # Store mapping of names to IDs
         self.odoo_conn_map = {}
-        source_names = []  # All Odoo connections can be sources
-        dest_names = []    # Only connections with allow_restore=True can be destinations
-        
+        odoo_names = []
         for conn in connections:
             if conn['type'] == 'odoo':
-                source_names.append(conn['name'])
+                odoo_names.append(conn['name'])
                 self.odoo_conn_map[conn['name']] = conn['id']
-                
-                # Only add to destination list if restore is allowed
-                if conn.get('allow_restore', False):
-                    dest_names.append(conn['name'])
 
-        self.source_combo["values"] = source_names
-        self.dest_combo["values"] = dest_names
+        self.source_combo["values"] = odoo_names
+        self.dest_combo["values"] = odoo_names
 
     def load_connection(self, target):
         """Load selected connection details"""
@@ -2351,6 +3526,7 @@ https://github.com/jpsteil/odoo-backup-manager
             "odoo_version": source_conn.get("odoo_version", ""),
             "db_only": self.db_only.get(),
             "filestore_only": self.filestore_only.get(),
+            "verbose": self.verbose.get(),
             "use_ssh": source_conn.get("use_ssh", False),
             "ssh_connection_id": source_conn.get("ssh_connection_id"),
         }
@@ -2375,7 +3551,6 @@ https://github.com/jpsteil/odoo-backup-manager
                     import shutil
                     shutil.move(backup_path, backup_file)
                     self.log_message(f"Backup saved to: {backup_file}", "success")
-                    self.refresh_backup_files()  # Refresh the file list
                     messagebox.showinfo("Success", f"Backup completed successfully!\nSaved to: {backup_file}")
                 else:
                     self.log_message("Backup failed", "error")
@@ -2430,16 +3605,6 @@ https://github.com/jpsteil/odoo-backup-manager
             messagebox.showerror("Error", "Failed to load destination connection details")
             return
         
-        # Check if restore is allowed for this connection
-        if not dest_conn.get('allow_restore', False):
-            messagebox.showerror(
-                "Restore Protected", 
-                f"Restore operations are not allowed for connection '{dest_name}'.\n\n"
-                f"This is a production database that is protected from restore operations.\n"
-                f"To enable restore, update the connection settings and explicitly allow restore."
-            )
-            return
-        
         # Prepare destination configuration
         dest_config = {
             "db_host": dest_conn["host"],
@@ -2451,7 +3616,7 @@ https://github.com/jpsteil/odoo-backup-manager
             "odoo_version": dest_conn.get("odoo_version", ""),
             "db_only": self.db_only.get(),
             "filestore_only": self.filestore_only.get(),
-            "neutralize": self.neutralize.get(),
+            "verbose": self.verbose.get(),
         }
         
         # Create custom confirmation dialog
@@ -2489,16 +3654,6 @@ https://github.com/jpsteil/odoo-backup-manager
             ttk.Label(msg_frame, text=f"• Replace filestore at: {dest_config['filestore_path']}").pack(anchor="w", padx=(20, 0), pady=2)
             ttk.Label(msg_frame, text="  (Existing filestore will be backed up)", 
                      font=("TkDefaultFont", 8, "italic")).pack(anchor="w", padx=(20, 0), pady=2)
-        
-        # Show neutralization warning if enabled
-        if self.neutralize.get():
-            ttk.Label(msg_frame, text="").pack(pady=5)  # Spacer
-            ttk.Label(msg_frame, text="⚠️ NEUTRALIZATION ENABLED:", 
-                     font=("TkDefaultFont", 10, "bold"), foreground="orange").pack(anchor="w", pady=2)
-            ttk.Label(msg_frame, text="• All emails will be disabled", foreground="orange").pack(anchor="w", padx=(20, 0), pady=2)
-            ttk.Label(msg_frame, text="• All scheduled actions (crons) will be disabled", foreground="orange").pack(anchor="w", padx=(20, 0), pady=2)
-            ttk.Label(msg_frame, text="• Admin password will be reset to 'admin'", foreground="orange").pack(anchor="w", padx=(20, 0), pady=2)
-            ttk.Label(msg_frame, text="• All user passwords will be reset to 'demo'", foreground="orange").pack(anchor="w", padx=(20, 0), pady=2)
         
         # Result variable
         result = {"confirmed": False}
@@ -2588,16 +3743,6 @@ https://github.com/jpsteil/odoo-backup-manager
         if not source_conn or not dest_conn:
             messagebox.showerror("Error", "Failed to load connection details")
             return
-        
-        # Check if restore is allowed for destination connection
-        if not dest_conn.get('allow_restore', False):
-            messagebox.showerror(
-                "Restore Protected", 
-                f"Restore operations are not allowed for connection '{dest_name}'.\n\n"
-                f"This is a production database that is protected from restore operations.\n"
-                f"To enable restore, update the connection settings and explicitly allow restore."
-            )
-            return
 
         # Prepare configurations
         source_config = {
@@ -2609,6 +3754,7 @@ https://github.com/jpsteil/odoo-backup-manager
             "filestore_path": source_conn["filestore_path"],
             "odoo_version": source_conn.get("odoo_version", ""),
             "db_only": self.db_only.get(),
+            "verbose": self.verbose.get(),
             "save_backup": self.save_backup.get(),
             "backup_dir": (
                 self.backup_dir_path.get() if self.save_backup.get() else None
@@ -2626,6 +3772,7 @@ https://github.com/jpsteil/odoo-backup-manager
             "filestore_path": dest_conn["filestore_path"],
             "db_only": self.db_only.get(),
             "filestore_only": self.filestore_only.get(),
+            "verbose": self.verbose.get(),
         }
 
         # Confirm operation
@@ -2685,3 +3832,38 @@ https://github.com/jpsteil/odoo-backup-manager
             self.root.after(0, lambda: self.execute_btn.config(state="normal"))
 
 
+def main():
+    # Check if cryptography is installed
+    try:
+        from cryptography.fernet import Fernet
+    except ImportError:
+        print("Error: cryptography module is required for connection management")
+        print("Install it with: pip install cryptography")
+        sys.exit(1)
+
+    parser = argparse.ArgumentParser(
+        description="Odoo Database and Filestore Backup/Restore Tool with Connection Manager",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+
+    parser.add_argument(
+        "--gui", action="store_true", help="Launch GUI interface (requires tkinter)"
+    )
+
+    args = parser.parse_args()
+
+    # Launch GUI
+    if not TKINTER_AVAILABLE:
+        print("❌ Error: tkinter is not installed!")
+        print("Install tkinter to use this tool:")
+        print("  Ubuntu/Debian: sudo apt-get install python3-tk")
+        print("  RHEL/CentOS: sudo dnf install python3-tkinter")
+        sys.exit(1)
+
+    root = tk.Tk()
+    app = OdooBackupRestoreGUI(root)
+    root.mainloop()
+
+
+if __name__ == "__main__":
+    main()

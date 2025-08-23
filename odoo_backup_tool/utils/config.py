@@ -11,7 +11,7 @@ class Config:
     """Configuration manager for the application"""
 
     DEFAULT_CONFIG = {
-        "backup_dir": str(Path.home() / "odoo_backups"),
+        "backup_dir": str(Path.home() / "Documents" / "OdooBackups"),
         "default_odoo_version": "17.0",
         "pg_dump_options": ["--no-owner", "--no-acl"],
         "compression_level": 6,
