@@ -21,7 +21,7 @@ class OdooBackupRestoreGUI:
 
     def __init__(self, root):
         self.root = root
-        self.root.title("Odoo Backup & Restore Tool with Connection Manager")
+        self.root.title("Odoo Backup & Restore Manager")
         # Let tkinter auto-size the window based on content
         # Set minimum size to prevent window from being too small
         self.root.minsize(800, 600)
@@ -669,8 +669,8 @@ class OdooBackupRestoreGUI:
         
         # Add help content
         help_content = """
-ODOO BACKUP TOOL - HELP GUIDE
-==============================
+ODOO BACKUP MANAGER - HELP GUIDE
+=================================
 
 OVERVIEW
 --------
@@ -770,7 +770,7 @@ SAFETY FEATURES
 • Automatic backup file verification
 
 For more information or to report issues, visit:
-https://github.com/jpsteil/odoo-backup-tool
+https://github.com/jpsteil/odoo-backup-manager
 """
         
         help_text.insert("1.0", help_content)
@@ -787,7 +787,7 @@ https://github.com/jpsteil/odoo-backup-tool
         help_text.config(state="normal")
         
         # Apply heading tags
-        for pattern in ["ODOO BACKUP TOOL - HELP GUIDE", "OVERVIEW", "OPERATION MODES", 
+        for pattern in ["ODOO BACKUP MANAGER - HELP GUIDE", "OVERVIEW", "OPERATION MODES", 
                        "DATABASE NEUTRALIZATION", "CONNECTIONS", "BACKUP FILES", 
                        "BACKUP STRUCTURE", "BEST PRACTICES", "TROUBLESHOOTING", 
                        "KEYBOARD SHORTCUTS", "SAFETY FEATURES"]:
@@ -797,7 +797,7 @@ https://github.com/jpsteil/odoo-backup-tool
                 if not pos:
                     break
                 end = f"{pos}+{len(pattern)}c"
-                help_text.tag_add("heading" if pattern == "ODOO BACKUP TOOL - HELP GUIDE" else "subheading", pos, end)
+                help_text.tag_add("heading" if pattern == "ODOO BACKUP MANAGER - HELP GUIDE" else "subheading", pos, end)
                 start = end
         
         # Apply warning tag

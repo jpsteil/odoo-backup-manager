@@ -1,4 +1,4 @@
-# Odoo Backup Tool
+# Odoo Backup Manager
 
 A comprehensive backup and restore utility for Odoo instances, supporting both database and filestore operations with local and remote (SSH) connections.
 
@@ -19,8 +19,8 @@ A comprehensive backup and restore utility for Odoo instances, supporting both d
 
 ```bash
 # Clone the repository
-git clone https://github.com/jpsteil/odoo-backup-tool.git
-cd odoo-backup-tool
+git clone https://github.com/jpsteil/odoo-backup-manager.git
+cd odoo-backup-manager
 
 # Install the package
 pip install -e .
@@ -35,7 +35,7 @@ pip install -r requirements-dev.txt
 ### Using pip
 
 ```bash
-pip install odoo-backup-tool
+pip install odoo-backup-manager
 ```
 
 ## Prerequisites

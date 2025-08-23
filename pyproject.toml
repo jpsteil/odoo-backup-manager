@@ -3,21 +3,20 @@ requires = ["setuptools>=61.0", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "odoo-backup-tool"
+name = "odoo-backup-manager"
 version = "1.0.0"
 description = "A comprehensive backup and restore utility for Odoo instances"
 readme = "README.md"
 requires-python = ">=3.8"
 license = "MIT"
 authors = [
-    {name = "Odoo Backup Tool Team"},
+    {name = "Jim Steil", email = "jim@steilonline.com"},
 ]
 keywords = ["odoo", "backup", "restore", "database", "postgresql"]
 classifiers = [
     "Development Status :: 4 - Beta",
     "Intended Audience :: System Administrators",
     "Topic :: System :: Archiving :: Backup",
-    "License :: OSI Approved :: MIT License",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.8",
     "Programming Language :: Python :: 3.9",
@@ -48,10 +47,10 @@ odoo-backup = "odoo_backup_tool.cli:main"
 odoo-backup-gui = "odoo_backup_tool.gui_launcher:main"
 
 [project.urls]
-Homepage = "https://github.com/jpsteil/odoo-backup-tool"
-Documentation = "https://github.com/jpsteil/odoo-backup-tool#readme"
-"Bug Tracker" = "https://github.com/jpsteil/odoo-backup-tool/issues"
-Repository = "https://github.com/jpsteil/odoo-backup-tool"
+Homepage = "https://github.com/jpsteil/odoo-backup-manager"
+Documentation = "https://github.com/jpsteil/odoo-backup-manager#readme"
+"Bug Tracker" = "https://github.com/jpsteil/odoo-backup-manager/issues"
+Repository = "https://github.com/jpsteil/odoo-backup-manager"
 
 [tool.setuptools.packages.find]
 where = ["."]

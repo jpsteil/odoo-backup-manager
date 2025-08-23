@@ -10,13 +10,13 @@ this_directory = Path(__file__).parent
 long_description = (this_directory / "README.md").read_text() if (this_directory / "README.md").exists() else ""
 
 setup(
-    name="odoo-backup-tool",
+    name="odoo-backup-manager",
     version="1.0.0",
-    author="Odoo Backup Tool Team",
+    author="Jim Steil",
     description="A comprehensive backup and restore utility for Odoo instances",
     long_description=long_description,
     long_description_content_type="text/markdown",
-    url="https://github.com/jpsteil/odoo-backup-tool",
+    url="https://github.com/jpsteil/odoo-backup-manager",
     packages=find_packages(),
     classifiers=[
         "Development Status :: 4 - Beta",
