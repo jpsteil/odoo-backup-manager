@@ -1,5 +1,9 @@
 # Odoo Backup Manager
 
+[![PyPI version](https://badge.fury.io/py/odoo-backup-manager.svg)](https://pypi.org/project/odoo-backup-manager/)
+[![Python versions](https://img.shields.io/pypi/pyversions/odoo-backup-manager.svg)](https://pypi.org/project/odoo-backup-manager/)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+
 A comprehensive backup and restore utility for Odoo instances, supporting both database and filestore operations with local and remote (SSH) connections.
 
 ## Features
