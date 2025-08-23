@@ -4,42 +4,117 @@ Command-line interface for Odoo Backup Tool
 """
 
 import sys
+import os
 import argparse
 import json
 from pathlib import Path
 import getpass
 
-from .core.backup_restore import OdooBackupRestore
-from .db.connection_manager import ConnectionManager
-from .utils.config import Config
+
+def detect_gui_capability():
+    """Detect if GUI can be launched"""
+    # Check if we're in a pipe or being redirected
+    if not sys.stdin.isatty() or not sys.stdout.isatty():
+        return False
+    
+    # Check for display
+    if not os.environ.get('DISPLAY') and not sys.platform.startswith('win') and not sys.platform == 'darwin':
+        return False
+    
+    # Check if tkinter is available
+    try:
+        import tkinter
+        return True
+    except ImportError:
+        return False
+
+
+def should_launch_gui(args=None):
+    """Determine if GUI should be launched based on environment and arguments"""
+    # If we have args, check for explicit CLI/GUI flags
+    if args:
+        # Force CLI mode if --cli flag is present
+        if hasattr(args, 'cli') and args.cli:
+            return False
+        # Force GUI mode if --gui flag is present
+        if hasattr(args, 'gui') and args.gui:
+            if not detect_gui_capability():
+                print("Error: GUI requested but not available.")
+                print("Please install tkinter: sudo apt-get install python3-tk")
+                print("Or use --cli flag to force CLI mode.")
+                sys.exit(1)
+            return True
+    
+    # If no specific command given, default to GUI if available
+    if not args or not args.command:
+        return detect_gui_capability()
+    
+    # If a command was given, stay in CLI mode
+    return False
 
 
 def main():
-    """Main CLI entry point"""
+    """Main entry point with smart GUI/CLI detection"""
+    # First, check if any arguments were provided
+    if len(sys.argv) == 1:
+        # No arguments - try to launch GUI if available
+        if detect_gui_capability():
+            launch_gui()
+            return
+    
+    # Parse arguments
+    parser = create_parser()
+    args = parser.parse_args()
+    
+    # Check if we should launch GUI based on args and environment
+    if should_launch_gui(args):
+        launch_gui()
+    else:
+        # Handle CLI commands
+        handle_cli(parser, args)
+
+
+def create_parser():
+    """Create the argument parser"""
     parser = argparse.ArgumentParser(
         description="Odoo Database and Filestore Backup/Restore Tool",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
+Default behavior:
+  odoo-backup              # Launches GUI if available, otherwise shows help
+  odoo-backup --cli        # Force CLI mode, shows help
+  odoo-backup --gui        # Force GUI mode (error if not available)
+
 Examples:
   # Save a connection profile (do this first)
-  odoo-backup connections save --name prod --host db.example.com --user odoo --database mydb --filestore /var/lib/odoo
-  odoo-backup connections save --name dev --host localhost --user odoo --database devdb --allow-restore
+  odoo-backup --cli connections save --name prod --host db.example.com --user odoo --database mydb --filestore /var/lib/odoo
+  odoo-backup --cli connections save --name dev --host localhost --user odoo --database devdb --allow-restore
 
   # Backup using connection profile
-  odoo-backup backup --connection prod
+  odoo-backup --cli backup --connection prod
 
   # Restore using connection profile
-  odoo-backup restore --connection dev --file backup.tar.gz --name test_db
+  odoo-backup --cli restore --connection dev --file backup.tar.gz --name test_db
 
   # List saved connections
-  odoo-backup connections list
+  odoo-backup --cli connections list
 
   # Manual backup (without saved connection)
-  odoo-backup backup --name mydb --host localhost --user odoo --filestore /var/lib/odoo/filestore
+  odoo-backup --cli backup --name mydb --host localhost --user odoo --filestore /var/lib/odoo/filestore
 
   # Manual restore (without saved connection)
-  odoo-backup restore --file backup.tar.gz --name newdb --host localhost --user odoo
+  odoo-backup --cli restore --file backup.tar.gz --name newdb --host localhost --user odoo
         """,
+    )
+    
+    # Add mode selection flags
+    parser.add_argument(
+        "--cli", action="store_true",
+        help="Force CLI mode (don't launch GUI even if available)"
+    )
+    parser.add_argument(
+        "--gui", action="store_true",
+        help="Force GUI mode (error if GUI not available)"
     )
 
     subparsers = parser.add_subparsers(dest="command", help="Available commands")
@@ -118,17 +193,31 @@ Examples:
     config_parser.add_argument("--backup", action="store_true", help="Perform backup")
     config_parser.add_argument("--output-dir", help="Output directory for backup")
 
-    # GUI command
+    # GUI command (explicit)
     gui_parser = subparsers.add_parser("gui", help="Launch GUI interface")
 
-    args = parser.parse_args()
+    return parser
 
-    if not args.command:
+
+def handle_cli(parser, args):
+    """Handle CLI-specific logic"""
+    from .core.backup_restore import OdooBackupRestore
+    from .db.connection_manager import ConnectionManager
+    from .utils.config import Config
+    
+    if not args.command and not args.gui and not args.cli:
+        # No command and no GUI available, show help
         parser.print_help()
         sys.exit(1)
-
-    # Handle commands
-    if args.command == "gui":
+    
+    if args.gui:
+        # Explicit GUI request
+        launch_gui()
+    elif not args.command:
+        # --cli flag but no command
+        parser.print_help()
+        sys.exit(1)
+    elif args.command == "gui":
         launch_gui()
     elif args.command == "backup":
         handle_backup(args)
@@ -156,11 +245,16 @@ def launch_gui():
         print("Error: GUI dependencies not available.")
         print("Please install tkinter: sudo apt-get install python3-tk")
         print(f"Error details: {e}")
+        print("\nYou can use CLI mode with: odoo-backup --cli [command]")
         sys.exit(1)
 
 
 def handle_backup(args):
     """Handle backup command"""
+    from .core.backup_restore import OdooBackupRestore
+    from .db.connection_manager import ConnectionManager
+    from .utils.config import Config
+    
     conn_manager = ConnectionManager()
     config = Config()
 
@@ -176,7 +270,7 @@ def handle_backup(args):
             print("\nAvailable connections:")
             for c in connections:
                 print(f"  - {c['name']}")
-            print("\nUse 'odoo-backup connections save' to create a new connection")
+            print("\nUse 'odoo-backup --cli connections save' to create a new connection")
             sys.exit(1)
 
         conn_data = conn_manager.get_odoo_connection(conn["id"])
@@ -232,6 +326,9 @@ def handle_backup(args):
 
 def handle_restore(args):
     """Handle restore command"""
+    from .core.backup_restore import OdooBackupRestore
+    from .db.connection_manager import ConnectionManager
+    
     conn_manager = ConnectionManager()
 
     # Check if backup file exists
@@ -251,7 +348,7 @@ def handle_restore(args):
             print("\nAvailable connections:")
             for c in connections:
                 print(f"  - {c['name']}")
-            print("\nUse 'odoo-backup connections save' to create a new connection")
+            print("\nUse 'odoo-backup --cli connections save' to create a new connection")
             sys.exit(1)
 
         conn_data = conn_manager.get_odoo_connection(conn["id"])
@@ -322,6 +419,8 @@ def handle_restore(args):
 
 def handle_connections(args):
     """Handle connections management"""
+    from .db.connection_manager import ConnectionManager
+    
     conn_manager = ConnectionManager()
 
     if args.conn_action == "list":
@@ -382,8 +481,10 @@ def handle_connections(args):
 
         if conn["type"] == "odoo":
             success = conn_manager.delete_odoo_connection(conn["id"])
-        else:
+        elif conn["type"] == "ssh":
             success = conn_manager.delete_ssh_connection(conn["id"])
+        else:
+            success = False
 
         if success:
             print(f"✅ Connection '{args.name}' deleted successfully")
@@ -399,68 +500,70 @@ def handle_connections(args):
 
         if conn["type"] == "odoo":
             conn_data = conn_manager.get_odoo_connection(conn["id"])
+            print(f"Testing connection '{args.name}'...")
+            # Here you would implement actual connection testing
+            # For now, just show the configuration
+            print(f"  Host: {conn_data['host']}:{conn_data['port']}")
+            print(f"  Database: {conn_data.get('database', 'N/A')}")
+            print(f"  User: {conn_data['username']}")
+            print("  ⚠️  Connection test not yet implemented")
 
-            # Test connection
-            backup_restore = OdooBackupRestore(conn_manager=conn_manager)
-            test_config = {
-                "db_name": conn_data["database"],
-                "db_host": conn_data["host"],
-                "db_port": conn_data["port"],
-                "db_user": conn_data["username"],
-                "db_password": conn_data["password"],
-                "filestore_path": conn_data["filestore_path"],
-            }
-
-            success, message = backup_restore.test_connection(test_config)
-            print(message)
-            if success:
-                print("✅ Connection test successful")
-            else:
-                print("❌ Connection test failed")
-        else:
-            print("Testing SSH connections not yet implemented")
+    else:
+        print("Error: No connection action specified")
+        print("Use: connections list|save|delete|test")
+        sys.exit(1)
 
 
 def handle_from_config(args):
     """Handle operations from odoo.conf file"""
-    try:
-        # Parse the odoo.conf file
-        config = OdooBackupRestore.parse_odoo_conf(args.config_file)
-
-        print(f"Loaded configuration from: {args.config_file}")
-        print(f"  Database: {config['database']}")
-        print(f"  Host: {config['host']}:{config['port']}")
-        print(f"  User: {config['username']}")
-        print(f"  Filestore: {config['filestore_path']}")
-
-        if args.backup:
-            # Add output directory if specified
-            if args.output_dir:
-                config["backup_dir"] = args.output_dir
-            else:
-                app_config = Config()
-                config["backup_dir"] = app_config.get_backup_dir()
-
-            # Prompt for database name if not in config
-            if not config["database"]:
-                config["database"] = input("Enter database name to backup: ")
-
-            config["db_name"] = config["database"]
-            config["db_host"] = config["host"]
-            config["db_port"] = config["port"]
-            config["db_user"] = config["username"]
-            config["db_password"] = config["password"]
-
-            # Perform backup
-            backup_restore = OdooBackupRestore()
-            backup_file = backup_restore.backup(config)
-            print(f"✅ Backup completed: {backup_file}")
-        else:
-            print("\nNo operation specified. Use --backup to create a backup.")
-
-    except Exception as e:
-        print(f"❌ Error: {e}")
+    from .core.backup_restore import OdooBackupRestore
+    from .utils.config import Config
+    
+    config_file = Path(args.config_file)
+    if not config_file.exists():
+        print(f"Error: Config file not found: {args.config_file}")
         sys.exit(1)
+
+    # Parse odoo.conf file
+    import configparser
+    odoo_config = configparser.ConfigParser()
+    odoo_config.read(config_file)
+
+    if "options" not in odoo_config:
+        print("Error: Invalid odoo.conf file (no 'options' section)")
+        sys.exit(1)
+
+    options = odoo_config["options"]
+    config = Config()
+
+    # Build backup configuration from odoo.conf
+    backup_config = {
+        "db_name": options.get("db_name", ""),
+        "db_host": options.get("db_host", "localhost"),
+        "db_port": int(options.get("db_port", 5432)),
+        "db_user": options.get("db_user", "odoo"),
+        "db_password": options.get("db_password", ""),
+        "filestore_path": options.get("data_dir", ""),
+        "backup_filestore": bool(options.get("data_dir")),
+        "backup_dir": args.output_dir or config.get_backup_dir(),
+    }
+
+    if not backup_config["db_name"]:
+        print("Error: No database name found in config file")
+        sys.exit(1)
+
+    if args.backup:
+        print(f"Creating backup from config: {args.config_file}")
+        print(f"Database: {backup_config['db_name']}")
+        try:
+            backup_restore = OdooBackupRestore()
+            backup_file = backup_restore.backup(backup_config)
+            print(f"✅ Backup completed successfully: {backup_file}")
+        except Exception as e:
+            print(f"❌ Backup failed: {e}")
+            sys.exit(1)
+    else:
+        print("Config file loaded. Use --backup to create a backup.")
 
 
 if __name__ == "__main__":
