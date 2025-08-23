@@ -21,17 +21,24 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  # Backup a database
-  odoo-backup backup --name mydb --host localhost --user odoo --filestore /var/lib/odoo/filestore
+  # Save a connection profile (do this first)
+  odoo-backup connections save --name prod --host db.example.com --user odoo --database mydb --filestore /var/lib/odoo
+  odoo-backup connections save --name dev --host localhost --user odoo --database devdb --allow-restore
 
-  # Restore from backup
-  odoo-backup restore --file backup_MYDB_20240101_120000.tar.gz --name newdb --host localhost --user odoo
+  # Backup using connection profile
+  odoo-backup backup --connection prod
+
+  # Restore using connection profile
+  odoo-backup restore --connection dev --file backup.tar.gz --name test_db
 
   # List saved connections
   odoo-backup connections list
 
-  # Save a new connection
-  odoo-backup connections save --name prod --host db.example.com --user odoo --database mydb
+  # Manual backup (without saved connection)
+  odoo-backup backup --name mydb --host localhost --user odoo --filestore /var/lib/odoo/filestore
+
+  # Manual restore (without saved connection)
+  odoo-backup restore --file backup.tar.gz --name newdb --host localhost --user odoo
         """,
     )
 
@@ -39,7 +46,8 @@ Examples:
 
     # Backup command
     backup_parser = subparsers.add_parser("backup", help="Create a backup")
-    backup_parser.add_argument("--name", required=True, help="Database name")
+    backup_parser.add_argument("--connection", "-c", help="Use saved connection profile (recommended)")
+    backup_parser.add_argument("--name", help="Database name (required if not using connection)")
     backup_parser.add_argument("--host", default="localhost", help="Database host")
     backup_parser.add_argument("--port", type=int, default=5432, help="Database port")
     backup_parser.add_argument("--user", default="odoo", help="Database user")
@@ -51,12 +59,12 @@ Examples:
     backup_parser.add_argument(
         "--no-filestore", action="store_true", help="Skip filestore backup"
     )
-    backup_parser.add_argument("--connection", help="Use saved connection profile")
 
     # Restore command
     restore_parser = subparsers.add_parser("restore", help="Restore from backup")
-    restore_parser.add_argument("--file", required=True, help="Backup file to restore")
-    restore_parser.add_argument("--name", required=True, help="Target database name")
+    restore_parser.add_argument("--file", "-f", required=True, help="Backup file to restore")
+    restore_parser.add_argument("--connection", "-c", help="Use saved connection profile (recommended)")
+    restore_parser.add_argument("--name", help="Target database name (required if not using connection)")
     restore_parser.add_argument("--host", default="localhost", help="Database host")
     restore_parser.add_argument("--port", type=int, default=5432, help="Database port")
     restore_parser.add_argument("--user", default="odoo", help="Database user")
@@ -67,7 +75,6 @@ Examples:
     restore_parser.add_argument(
         "--no-filestore", action="store_true", help="Skip filestore restore"
     )
-    restore_parser.add_argument("--connection", help="Use saved connection profile")
     restore_parser.add_argument(
         "--neutralize", action="store_true", 
         help="Neutralize database for testing (disable emails, reset passwords, etc.)"
@@ -92,6 +99,10 @@ Examples:
     conn_save.add_argument("--password", help="Database password")
     conn_save.add_argument("--filestore", help="Filestore path")
     conn_save.add_argument("--odoo-version", default="17.0", help="Odoo version")
+    conn_save.add_argument(
+        "--allow-restore", action="store_true",
+        help="Allow restore operations to this connection (use for dev/test only, not production)"
+    )
 
     # Delete connection
     conn_delete = conn_subparsers.add_parser("delete", help="Delete a connection")
@@ -157,17 +168,21 @@ def handle_backup(args):
     backup_config = {}
 
     if args.connection:
-        # Load from saved connection
+        # Load from saved connection (preferred method)
         connections = conn_manager.list_connections()
         conn = next((c for c in connections if c["name"] == args.connection), None)
         if not conn:
             print(f"Error: Connection '{args.connection}' not found")
+            print("\nAvailable connections:")
+            for c in connections:
+                print(f"  - {c['name']}")
+            print("\nUse 'odoo-backup connections save' to create a new connection")
             sys.exit(1)
 
         conn_data = conn_manager.get_odoo_connection(conn["id"])
         backup_config.update(
             {
-                "db_name": conn_data["database"] or args.name,
+                "db_name": args.name or conn_data["database"],  # Allow override with --name
                 "db_host": conn_data["host"],
                 "db_port": conn_data["port"],
                 "db_user": conn_data["username"],
@@ -175,10 +190,22 @@ def handle_backup(args):
                 "filestore_path": conn_data["filestore_path"],
             }
         )
+        
+        if not backup_config["db_name"]:
+            print("Error: Database name not specified. Use --name to specify the database to backup")
+            sys.exit(1)
+            
+        print(f"Using connection: {args.connection}")
+        print(f"Backing up database: {backup_config['db_name']}")
     else:
-        # Use command line arguments
+        # Manual configuration (backward compatibility)
+        if not args.name:
+            print("Error: Database name is required when not using a connection profile")
+            print("Use --name to specify the database or --connection to use a saved profile")
+            sys.exit(1)
+            
         password = args.password
-        if not password and not args.connection:
+        if not password:
             password = getpass.getpass("Database password: ")
 
         backup_config = {
@@ -216,17 +243,29 @@ def handle_restore(args):
     restore_config = {}
 
     if args.connection:
-        # Load from saved connection
+        # Load from saved connection (preferred method)
         connections = conn_manager.list_connections()
         conn = next((c for c in connections if c["name"] == args.connection), None)
         if not conn:
             print(f"Error: Connection '{args.connection}' not found")
+            print("\nAvailable connections:")
+            for c in connections:
+                print(f"  - {c['name']}")
+            print("\nUse 'odoo-backup connections save' to create a new connection")
             sys.exit(1)
 
         conn_data = conn_manager.get_odoo_connection(conn["id"])
+        
+        # Check if restore is allowed for this connection
+        if not conn_data.get('allow_restore', False):
+            print(f"Error: Restore operations are not allowed for connection '{args.connection}'")
+            print("This is a safety feature to prevent accidental restores to production databases.")
+            print("To enable restore for this connection, edit it and enable the 'Allow Restore' option.")
+            sys.exit(1)
+            
         restore_config.update(
             {
-                "db_name": args.name,  # Always use the provided name for restore
+                "db_name": args.name or conn_data["database"],  # Allow override with --name
                 "db_host": conn_data["host"],
                 "db_port": conn_data["port"],
                 "db_user": conn_data["username"],
@@ -234,8 +273,20 @@ def handle_restore(args):
                 "filestore_path": conn_data["filestore_path"],
             }
         )
+        
+        if not restore_config["db_name"]:
+            print("Error: Database name not specified. Use --name to specify the target database")
+            sys.exit(1)
+            
+        print(f"Using connection: {args.connection}")
+        print(f"Restoring to database: {restore_config['db_name']}")
     else:
-        # Use command line arguments
+        # Manual configuration (backward compatibility)
+        if not args.name:
+            print("Error: Database name is required when not using a connection profile")
+            print("Use --name to specify the target database or --connection to use a saved profile")
+            sys.exit(1)
+            
         password = args.password
         if not password:
             password = getpass.getpass("Database password: ")
@@ -257,7 +308,13 @@ def handle_restore(args):
         backup_restore = OdooBackupRestore()
         success = backup_restore.restore(restore_config, args.file)
         if success:
-            print(f"✅ Restore completed successfully to database: {args.name}")
+            print(f"✅ Restore completed successfully to database: {restore_config['db_name']}")
+            if args.neutralize:
+                print("🧪 Database has been neutralized for testing:")
+                print("   - All outgoing mail servers disabled")
+                print("   - All scheduled actions (crons) disabled")
+                print("   - Admin password reset to 'admin'")
+                print("   - All user passwords reset to 'demo'")
     except Exception as e:
         print(f"❌ Restore failed: {e}")
         sys.exit(1)
@@ -275,7 +332,15 @@ def handle_connections(args):
             print("\nSaved Connections:")
             print("-" * 60)
             for conn in connections:
-                print(f"  [{conn['type'].upper()}] {conn['name']}")
+                # Get full connection details for Odoo connections
+                if conn['type'] == 'odoo':
+                    conn_data = conn_manager.get_odoo_connection(conn['id'])
+                    allow_restore = conn_data.get('allow_restore', False)
+                    restore_status = " ✅" if allow_restore else " 🔒"
+                else:
+                    restore_status = ""
+                    
+                print(f"  [{conn['type'].upper()}] {conn['name']}{restore_status}")
                 print(f"    Host: {conn['host']}:{conn['port']}")
                 if conn["type"] == "odoo" and conn.get("database"):
                     print(f"    Database: {conn['database']}")
@@ -295,10 +360,16 @@ def handle_connections(args):
             "password": password if password else None,
             "filestore_path": args.filestore,
             "odoo_version": args.odoo_version,
+            "allow_restore": args.allow_restore,
         }
 
         if conn_manager.save_odoo_connection(args.name, config):
             print(f"✅ Connection '{args.name}' saved successfully")
+            if args.allow_restore:
+                print("⚠️  Warning: Restore operations are enabled for this connection")
+                print("   This should only be used for development/test databases")
+            else:
+                print("🔒 Restore operations are disabled (production safe)")
         else:
             print(f"❌ Failed to save connection '{args.name}'")
 
