@@ -11,7 +11,7 @@ long_description = (this_directory / "README.md").read_text() if (this_directory
 
 setup(
     name="odoo-backup-manager",
-    version="1.0.0",
+    version="1.0.1",
     author="Jim Steil",
     description="A comprehensive backup and restore utility for Odoo instances",
     long_description=long_description,
