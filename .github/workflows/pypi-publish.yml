@@ -30,7 +30,11 @@ jobs:
     
     - name: Check package
       run: twine check dist/*
-    
+
+    - name: Ensure PYPI_API_TOKEN is set
+      run: |
+        [ -n "${{ secrets.PYPI_API_TOKEN }}" ] || { echo "PYPI_API_TOKEN is EMPTY or undefined"; exit 1; }
+
     - name: Publish to TestPyPI (optional)
       if: github.event.release.prerelease == true
       env:
