@@ -827,9 +827,7 @@ class OdooBackupRestore:
             
             self.log("Database neutralization complete:", "success")
             self.log("  ✓ All outgoing mail servers disabled", "info")
-            self.log("  ✓ All scheduled actions (crons) disabled", "info") 
-            self.log("  ✓ Admin password reset to 'admin'", "info")
-            self.log("  ✓ All user passwords reset to 'demo'", "info")
+            self.log("  ✓ All scheduled actions (crons) disabled", "info")
             self.log("  ✓ Payment acquirers disabled", "info")
             self.log("  ✓ Email queue cleared", "info")
             self.log("  ✓ Website indexing disabled", "info")

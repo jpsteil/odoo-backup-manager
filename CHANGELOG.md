@@ -2,6 +2,13 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.5.11] - 2025-01-25
+
+### Fixed
+- Removed misleading log messages about password resets that weren't actually happening
+- Passwords are now preserved during restore (no password resets occur)
+- Corrected neutralization log output to match actual operations
+
 ## [1.5.10] - 2025-01-25
 
 ### Fixed
