@@ -18,6 +18,15 @@ jobs:
         with:
           ref: ${{ github.event.release.tag_name }}
 
+      - name: Debug checkout
+        run: |
+          echo "Release tag: ${{ github.event.release.tag_name }}"
+          echo "Current commit: $(git rev-parse HEAD)"
+          echo "Current version in setup.py:"
+          grep "version=" setup.py || echo "setup.py not found"
+          echo "Current version in __init__.py:"
+          grep "__version__" odoo_backup_tool/__init__.py || echo "__init__.py not found"
+
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
