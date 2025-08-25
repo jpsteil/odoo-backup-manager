@@ -822,18 +822,18 @@ class OdooBackupRestore:
             if config.get("db_password"):
                 env["PGPASSWORD"] = config["db_password"]
             
-            # SQL queries to clean up and regenerate assets
+            # SQL queries to fix icon display issues
             cleanup_sql = """
-            -- Clear asset attachments to force regeneration
-            DELETE FROM ir_attachment 
-            WHERE name LIKE '/web/assets/%' 
-               OR name LIKE '/web/content/%'
-               OR (res_model = 'ir.ui.menu' AND res_field = 'web_icon_data');
-            
-            -- Clear cached menu icons
+            -- Clear only icon-specific attachments (safe to delete)
             DELETE FROM ir_attachment 
             WHERE res_model = 'ir.ui.menu' 
-              AND res_field IN ('web_icon', 'web_icon_data');
+              AND res_field = 'web_icon_data';
+            
+            -- Reset web icon data to force Odoo to reload from module files
+            UPDATE ir_ui_menu 
+            SET web_icon_data = NULL 
+            WHERE web_icon IS NOT NULL
+              AND web_icon LIKE '%static/%';
             
             -- Reset asset bundle timestamps to force regeneration
             UPDATE ir_attachment 
@@ -858,8 +858,12 @@ class OdooBackupRestore:
                 END IF;
             END $$;
             
-            -- Clear QWeb template cache
-            DELETE FROM ir_ui_view WHERE type = 'qweb' AND arch_fs IS NOT NULL;
+            -- Force icon cache refresh without touching reports or critical views
+            -- We only update timestamps to trigger cache invalidation
+            UPDATE ir_attachment 
+            SET create_date = create_date 
+            WHERE res_model = 'ir.ui.menu' 
+              AND name LIKE '%icon%';
             
             -- Clear translation cache for menus (forces icon reload)
             DELETE FROM ir_translation 
