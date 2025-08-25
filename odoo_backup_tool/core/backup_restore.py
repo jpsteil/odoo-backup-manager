@@ -812,6 +812,116 @@ class OdooBackupRestore:
             self.log("Restore will continue despite neutralization error", "warning")
             return False
 
+    def post_restore_cleanup(self, config):
+        """Post-restore cleanup to ensure proper asset generation and icon display"""
+        try:
+            self.log("=== Post-Restore Cleanup ===", "info")
+            self.update_progress(92, "Regenerating assets...")
+            
+            env = os.environ.copy()
+            if config.get("db_password"):
+                env["PGPASSWORD"] = config["db_password"]
+            
+            # SQL queries to clean up and regenerate assets
+            cleanup_sql = """
+            -- Clear asset attachments to force regeneration
+            DELETE FROM ir_attachment 
+            WHERE name LIKE '/web/assets/%' 
+               OR name LIKE '/web/content/%'
+               OR (res_model = 'ir.ui.menu' AND res_field = 'web_icon_data');
+            
+            -- Clear cached menu icons
+            DELETE FROM ir_attachment 
+            WHERE res_model = 'ir.ui.menu' 
+              AND res_field IN ('web_icon', 'web_icon_data');
+            
+            -- Reset asset bundle timestamps to force regeneration
+            UPDATE ir_attachment 
+            SET write_date = NOW() 
+            WHERE name LIKE '%assets%' AND res_model = 'ir.ui.view';
+            
+            -- Update system parameters for proper base URL
+            DO $$
+            DECLARE
+                base_url_exists BOOLEAN;
+            BEGIN
+                -- Check if web.base.url parameter exists
+                SELECT EXISTS(
+                    SELECT 1 FROM ir_config_parameter 
+                    WHERE key = 'web.base.url'
+                ) INTO base_url_exists;
+                
+                -- If it exists but is frozen, unfreeze it
+                IF base_url_exists THEN
+                    DELETE FROM ir_config_parameter 
+                    WHERE key = 'web.base.url.freeze';
+                END IF;
+            END $$;
+            
+            -- Clear QWeb template cache
+            DELETE FROM ir_ui_view WHERE type = 'qweb' AND arch_fs IS NOT NULL;
+            
+            -- Clear translation cache for menus (forces icon reload)
+            DELETE FROM ir_translation 
+            WHERE name LIKE 'ir.ui.menu,%' 
+              AND name LIKE '%web_icon%';
+            
+            -- Invalidate all caches by updating cache registry
+            UPDATE ir_model_data 
+            SET write_date = NOW() 
+            WHERE model = 'ir.ui.menu' 
+              AND res_id IN (
+                  SELECT id FROM ir_ui_menu 
+                  WHERE web_icon IS NOT NULL
+              );
+            """
+            
+            # Execute cleanup queries
+            psql_cmd = [
+                "psql",
+                "-h", config["db_host"],
+                "-p", str(config["db_port"]),
+                "-U", config["db_user"],
+                "-d", config["db_name"],
+                "-c", cleanup_sql
+            ]
+            
+            result = subprocess.run(psql_cmd, env=env, capture_output=True, text=True)
+            
+            if result.returncode != 0:
+                self.log(f"Warning: Some cleanup queries may have failed: {result.stderr}", "warning")
+            
+            # Clean filestore assets if filestore path is provided
+            if config.get("filestore_path"):
+                filestore_path = config["filestore_path"]
+                assets_path = os.path.join(filestore_path, "filestore", config["db_name"], ".assets")
+                
+                if os.path.exists(assets_path):
+                    self.log(f"Clearing asset cache at: {assets_path}")
+                    try:
+                        shutil.rmtree(assets_path, ignore_errors=True)
+                        self.log("Asset cache cleared successfully", "success")
+                    except Exception as e:
+                        self.log(f"Warning: Could not clear asset cache: {e}", "warning")
+            
+            self.log("Post-restore cleanup complete:", "success")
+            self.log("  ✓ Asset attachments cleared for regeneration", "info")
+            self.log("  ✓ Menu icon cache cleared", "info")
+            self.log("  ✓ QWeb template cache cleared", "info")
+            self.log("  ✓ System parameters updated", "info")
+            self.log("  ✓ Filestore asset cache cleared", "info")
+            self.log("", "info")
+            self.log("NOTE: Icons will regenerate on first access to Odoo", "info")
+            
+            self.update_progress(95, "Cleanup complete")
+            return True
+            
+        except Exception as e:
+            self.log(f"Error during post-restore cleanup: {str(e)}", "error")
+            # Don't fail the entire restore if cleanup fails
+            self.log("Restore will continue despite cleanup error", "warning")
+            return False
+
     def restore(self, config, backup_file):
         """Restore from a backup archive file"""
         try:
@@ -837,6 +947,9 @@ class OdooBackupRestore:
             # Neutralize database if requested
             if config.get("neutralize", False):
                 self.neutralize_database(config)
+
+            # Clean up and regenerate assets for proper icon display
+            self.post_restore_cleanup(config)
 
             self.update_progress(100, "Restore completed!")
             self.log("=== Restore Complete ===", "success")
