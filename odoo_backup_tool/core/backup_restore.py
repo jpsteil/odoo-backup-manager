@@ -822,18 +822,33 @@ class OdooBackupRestore:
             if config.get("db_password"):
                 env["PGPASSWORD"] = config["db_password"]
             
-            # SQL queries to fix icon display issues
+            # SQL queries to fix icon display issues (version-agnostic)
             cleanup_sql = """
             -- Clear only icon-specific attachments (safe to delete)
             DELETE FROM ir_attachment 
             WHERE res_model = 'ir.ui.menu' 
-              AND res_field = 'web_icon_data';
+              AND (res_field = 'web_icon_data' OR res_field = 'web_icon' OR name LIKE '%icon%');
             
-            -- Reset web icon data to force Odoo to reload from module files
-            UPDATE ir_ui_menu 
-            SET web_icon_data = NULL 
-            WHERE web_icon IS NOT NULL
-              AND web_icon LIKE '%static/%';
+            -- Clear any compiled asset bundles containing icons
+            DELETE FROM ir_attachment 
+            WHERE (name LIKE '/web/assets/%' OR name LIKE '/web/content/%')
+              AND (name LIKE '%icon%' OR name LIKE '%font%' OR name LIKE '%awesome%');
+            
+            -- Reset web icon data if the column exists (version-dependent)
+            DO $$
+            BEGIN
+                IF EXISTS (
+                    SELECT 1 
+                    FROM information_schema.columns 
+                    WHERE table_name = 'ir_ui_menu' 
+                    AND column_name = 'web_icon_data'
+                ) THEN
+                    UPDATE ir_ui_menu 
+                    SET web_icon_data = NULL 
+                    WHERE web_icon IS NOT NULL
+                      AND web_icon LIKE '%static/%';
+                END IF;
+            END $$;
             
             -- Reset asset bundle timestamps to force regeneration
             UPDATE ir_attachment 
@@ -858,26 +873,21 @@ class OdooBackupRestore:
                 END IF;
             END $$;
             
-            -- Force icon cache refresh without touching reports or critical views
-            -- We only update timestamps to trigger cache invalidation
+            -- Force cache refresh for all menu-related assets
             UPDATE ir_attachment 
-            SET create_date = create_date 
-            WHERE res_model = 'ir.ui.menu' 
-              AND name LIKE '%icon%';
+            SET write_date = NOW() - interval '1 day'
+            WHERE res_model IN ('ir.ui.menu', 'ir.module.module')
+              AND (name LIKE '%icon%' OR name LIKE '%logo%' OR res_field LIKE '%icon%');
             
             -- Clear translation cache for menus (forces icon reload)
             DELETE FROM ir_translation 
             WHERE name LIKE 'ir.ui.menu,%' 
               AND name LIKE '%web_icon%';
             
-            -- Invalidate all caches by updating cache registry
-            UPDATE ir_model_data 
-            SET write_date = NOW() 
-            WHERE model = 'ir.ui.menu' 
-              AND res_id IN (
-                  SELECT id FROM ir_ui_menu 
-                  WHERE web_icon IS NOT NULL
-              );
+            -- Invalidate the module icon cache (works across versions)
+            UPDATE ir_module_module 
+            SET write_date = NOW() - interval '1 day'
+            WHERE icon IS NOT NULL;
             """
             
             # Execute cleanup queries
