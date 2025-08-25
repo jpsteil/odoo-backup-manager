@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "odoo-backup-manager"
-version = "1.5.3"
+dynamic = ["version", "entry-points"]
 description = "A comprehensive backup and restore utility for Odoo instances"
 readme = "README.md"
 requires-python = ">=3.8"
@@ -42,9 +42,6 @@ dev = [
     "twine>=4.0.0",
 ]
 
-[project.scripts]
-odoo-backup = "odoo_backup_tool.cli:main"
-odoo-backup-gui = "odoo_backup_tool.gui_launcher:main"
 
 [project.urls]
 Homepage = "https://github.com/jpsteil/odoo-backup-manager"
@@ -58,6 +55,9 @@ include = ["odoo_backup_tool*"]
 
 [tool.setuptools]
 include-package-data = false
+
+[tool.setuptools.dynamic]
+version = {attr = "odoo_backup_tool.__version__"}
 
 [tool.setuptools.package-data]
 odoo_backup_tool = ["py.typed"]

@@ -9,9 +9,23 @@ from pathlib import Path
 this_directory = Path(__file__).parent
 long_description = (this_directory / "README.md").read_text() if (this_directory / "README.md").exists() else ""
 
+# Read version from __init__.py
+def get_version():
+    version_file = this_directory / "odoo_backup_tool" / "__init__.py"
+    version_content = version_file.read_text()
+    # Look for __version__ = "x.y.z" or __version__ = 'x.y.z'
+    for line in version_content.splitlines():
+        if line.startswith('__version__'):
+            # Extract the version string between quotes
+            if '"' in line:
+                return line.split('"')[1]
+            elif "'" in line:
+                return line.split("'")[1]
+    raise RuntimeError("Unable to find version string.")
+
 setup(
     name="odoo-backup-manager",
-    version="1.5.3",
+    version=get_version(),
     author="Jim Steil",
     description="A comprehensive backup and restore utility for Odoo instances",
     long_description=long_description,
