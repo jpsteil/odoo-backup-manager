@@ -2,6 +2,16 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.5.10] - 2025-01-25
+
+### Fixed
+- Removed dangerous attachment deletion from post-restore cleanup
+- Post-restore cleanup now only unfreezes base URL configuration
+- Preserved all user documents, images, and attachments during restore
+
+### Security
+- Prevented potential data loss from overly aggressive cleanup operations
+
 ## [1.5.9] - 2025-01-25
 
 ### Fixed

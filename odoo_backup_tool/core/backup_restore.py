@@ -845,22 +845,17 @@ class OdooBackupRestore:
             return False
 
     def post_restore_cleanup(self, config):
-        """Post-restore cleanup to ensure proper asset generation and icon display"""
+        """Post-restore cleanup to ensure proper configuration"""
         try:
             self.log("=== Post-Restore Cleanup ===", "info")
-            self.update_progress(92, "Regenerating assets...")
+            self.update_progress(92, "Cleaning up configuration...")
             
             env = os.environ.copy()
             if config.get("db_password"):
                 env["PGPASSWORD"] = config["db_password"]
             
-            # MINIMAL SQL to fix icon display - only what's needed
+            # MINIMAL SQL cleanup - only configuration fixes, no asset deletion
             cleanup_sql = """
-            -- Clear icon-related attachments (these regenerate safely)
-            DELETE FROM ir_attachment 
-            WHERE res_model = 'ir.ui.menu' 
-              AND res_field IN ('web_icon', 'web_icon_data');
-            
             -- Unfreeze base URL if frozen (common restore issue)
             DELETE FROM ir_config_parameter 
             WHERE key = 'web.base.url.freeze';
