@@ -353,15 +353,12 @@ class OdooBackupRestore:
             archive_name = os.path.join(self.temp_dir, "filestore.tar.gz")
             remote_temp = f"/tmp/filestore_{self.timestamp}.tar.gz"
 
-            # Check and adjust filestore path
+            # Check filestore path
             self.log("Checking remote filestore path...")
             stdin, stdout, stderr = ssh.exec_command(f"test -d '{filestore_path}'")
             if stdout.channel.recv_exit_status() != 0:
-                # Path doesn't exist, try with database name appended
-                db_name = config.get("db_name", "")
-                if db_name:
-                    filestore_path = os.path.join(filestore_path, "filestore", db_name)
-                    self.log(f"Adjusted filestore path to: {filestore_path}")
+                # Path doesn't exist - log warning but use as-is
+                self.log(f"Warning: Filestore path does not exist: {filestore_path}", "warning")
 
             # Estimate and check disk space
             self.log("Estimating backup size...")
@@ -711,31 +708,54 @@ class OdooBackupRestore:
                 env["PGPASSWORD"] = config["db_password"]
             
             # Build the neutralization SQL queries
+            # Using DO blocks to handle tables that might not exist (from optional modules)
             neutralize_sql = """
             -- Disable all outgoing mail servers
             UPDATE ir_mail_server SET active = false WHERE active = true;
             
+            -- Remove email server configurations (keep records but clear credentials)
+            UPDATE ir_mail_server 
+            SET smtp_user = NULL, 
+                smtp_pass = NULL,
+                smtp_host = 'disabled.example.com',
+                smtp_port = 25
+            WHERE active = false;
+            
             -- Disable all scheduled actions (crons)
             UPDATE ir_cron SET active = false WHERE active = true;
             
-            -- Reset admin password to 'admin' (using Odoo's password hash)
-            UPDATE res_users 
-            SET password = '$pbkdf2-sha512$25000$UApBiDFmTGktxXiPEYIwJg$Ius6wK3iLCzZYrcF7N/siGtEbCWVdgUy4v3IKHuvxBXotetNmwKQc5BpRs1ItQan1WPZV9yofLJrJhMZr0MuWw'
-            WHERE login = 'admin';
+            -- Clear all email queues
+            DELETE FROM mail_mail WHERE state IN ('outgoing', 'exception', 'cancel');
             
-            -- Reset all other user passwords to 'demo'
-            UPDATE res_users 
-            SET password = '$pbkdf2-sha512$25000$c26VsrYWAkCIUWqtVUqp1Q$0bAM1MF6FA5V5hPu0h8Y.dKOzekUVbFDuXpYm44MaQR9oGY0Yd5qvSx6YV1orchImpl0kqVBPvQ3n..4bLpxg'
-            WHERE login != 'admin' AND login != '__system__';
+            -- Clear email from fetchmail servers if module is installed
+            DO $$
+            BEGIN
+                IF EXISTS (SELECT FROM information_schema.tables WHERE table_name = 'fetchmail_server') THEN
+                    UPDATE fetchmail_server SET active = false WHERE active = true;
+                    UPDATE fetchmail_server 
+                    SET "user" = NULL, 
+                        password = NULL,
+                        server = 'disabled.example.com'
+                    WHERE active = false;
+                END IF;
+            END $$;
             
-            -- Disable all payment acquirers
-            UPDATE payment_acquirer SET state = 'disabled' WHERE state != 'disabled';
+            -- Disable all payment acquirers if module is installed
+            DO $$
+            BEGIN
+                IF EXISTS (SELECT FROM information_schema.tables WHERE table_name = 'payment_acquirer') THEN
+                    UPDATE payment_acquirer SET state = 'disabled' WHERE state != 'disabled';
+                END IF;
+            END $$;
             
-            -- Clear all email queue
-            DELETE FROM mail_mail WHERE state IN ('outgoing', 'exception');
-            
-            -- Disable website robots.txt indexing
-            UPDATE website SET robots_txt = E'User-agent: *\\nDisallow: /' WHERE robots_txt IS NULL OR robots_txt != E'User-agent: *\\nDisallow: /';
+            -- Disable website robots.txt indexing if website module is installed
+            DO $$
+            BEGIN
+                IF EXISTS (SELECT FROM information_schema.tables WHERE table_name = 'website') THEN
+                    UPDATE website SET robots_txt = E'User-agent: *\\nDisallow: /' 
+                    WHERE robots_txt IS NULL OR robots_txt != E'User-agent: *\\nDisallow: /';
+                END IF;
+            END $$;
             
             -- Add warning message to company name
             UPDATE res_company 

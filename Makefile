@@ -2,6 +2,9 @@
 
 .PHONY: all help install build test check clean distclean run run-cli run-gui lint format deps dev
 
+# Detect Python command - use python if available, otherwise python3
+PYTHON := $(shell command -v python 2>/dev/null || command -v python3 2>/dev/null)
+
 # Default target - typically builds/compiles the project
 all: install
 
@@ -29,7 +32,7 @@ help:
 deps:
 	@if [ ! -d "venv" ]; then \
 		echo "Creating virtual environment..."; \
-		python3 -m venv venv; \
+		$(PYTHON) -m venv venv; \
 	fi
 	@echo "Installing dependencies..."
 	@venv/bin/pip install --upgrade pip -q

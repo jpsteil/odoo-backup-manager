@@ -12,6 +12,7 @@ from datetime import datetime
 import json
 import socket
 import paramiko
+import configparser
 
 from ..core.backup_restore import OdooBackupRestore
 from ..db.connection_manager import ConnectionManager
@@ -58,7 +59,7 @@ class OdooBackupRestoreGUI:
         self.auto_size_window()
     
     def auto_size_window(self):
-        """Auto-size the window to fit its content nicely"""
+        """Auto-size the window to fit its content nicely and center on primary monitor"""
         # Update the window to calculate widget sizes
         self.root.update_idletasks()
         
@@ -70,16 +71,43 @@ class OdooBackupRestoreGUI:
         width = max(req_width + 20, 900)  # Min 900 width
         height = max(req_height + 20, 650)  # Min 650 height
         
-        # Get screen dimensions
+        # For multi-monitor setups, center on the primary monitor
+        # First, set a default position to ensure window appears on primary monitor
+        self.root.geometry(f"{width}x{height}+50+50")
+        self.root.update_idletasks()
+        
+        # Now get the actual monitor dimensions where the window is
+        # This works better for multi-monitor setups
+        monitor_x = self.root.winfo_x()
+        monitor_y = self.root.winfo_y()
+        
+        # Get the monitor's actual usable area
         screen_width = self.root.winfo_screenwidth()
         screen_height = self.root.winfo_screenheight()
         
-        # Center the window on screen
-        x = (screen_width - width) // 2
-        y = (screen_height - height) // 2
+        # For multi-monitor, we need to estimate primary monitor size
+        # Most common setup is side-by-side monitors of equal size
+        if screen_width > screen_height * 2:
+            # Likely multi-monitor side-by-side
+            primary_width = screen_width // 2
+            primary_height = screen_height
+            # Center on left (primary) monitor
+            x = (primary_width - width) // 2
+            y = (primary_height - height) // 2
+        else:
+            # Single monitor or vertical setup
+            x = (screen_width - width) // 2
+            y = (screen_height - height) // 2
         
-        # Set the geometry
+        # Ensure window doesn't go off-screen
+        x = max(10, x)  # At least 10 pixels from edge
+        y = max(10, y)
+        
+        # Set the geometry to center the window
         self.root.geometry(f"{width}x{height}+{x}+{y}")
+        
+        # Force update to ensure centering takes effect
+        self.root.update()
     
     def load_config(self):
         """Load configuration from database"""
@@ -229,7 +257,7 @@ class OdooBackupRestoreGUI:
 
         self.db_only = tk.BooleanVar()
         self.filestore_only = tk.BooleanVar()
-        self.neutralize = tk.BooleanVar()
+        self.neutralize = tk.BooleanVar(value=True)  # Default to checked for safety
 
         ttk.Checkbutton(
             options_frame, text="Database Only", variable=self.db_only
@@ -257,12 +285,12 @@ class OdooBackupRestoreGUI:
         self.progress_bar = ttk.Progressbar(progress_frame, mode="determinate")
         self.progress_bar.pack(fill="x", pady=5)
 
-        # Log - set fixed height instead of expanding
+        # Log - expand to fill available space
         log_frame = ttk.LabelFrame(main_container, text="Output Log", padding="5")
-        log_frame.pack(fill="both", expand=False, pady=5)
+        log_frame.pack(fill="both", expand=True, pady=5)
 
-        # Fixed height for log to ensure buttons are visible
-        self.log_text = scrolledtext.ScrolledText(log_frame, height=10, wrap=tk.WORD)
+        # Remove fixed height to allow expansion
+        self.log_text = scrolledtext.ScrolledText(log_frame, wrap=tk.WORD)
         self.log_text.pack(fill="both", expand=True)
 
         # Configure tags for colored output
@@ -1126,50 +1154,98 @@ https://github.com/jpsteil/odoo-backup-manager
     
     def load_from_remote_odoo_conf(self, fields):
         """Load connection settings from a remote odoo.conf file via SSH"""
-        # First, select an SSH connection
+        # Check if SSH connection is already selected
+        pre_selected_ssh = None
+        if fields.get("use_ssh") and fields["use_ssh"].get() and fields.get("ssh_connection"):
+            pre_selected_ssh = fields["ssh_connection"].get()
+        
+        # Create dialog
         ssh_dialog = tk.Toplevel(self.root)
         ssh_dialog.title("Load Remote odoo.conf")
-        ssh_dialog.geometry("400x150")
-        
-        # Center dialog
-        self.root.update_idletasks()
-        x = self.root.winfo_x() + (self.root.winfo_width() // 2) - 200
-        y = self.root.winfo_y() + (self.root.winfo_height() // 2) - 75
-        ssh_dialog.geometry(f"400x150+{x}+{y}")
-        
-        ssh_dialog.transient(self.root)
-        ssh_dialog.grab_set()
         
         ssh_fields = {}
         
-        # Get list of SSH connections
-        ssh_connections = []
-        all_connections = self.conn_manager.list_connections()
-        for conn in all_connections:
-            if conn['type'] == "ssh":
-                ssh_connections.append(conn['name'])
-        
-        if not ssh_connections:
-            messagebox.showerror("Error", "No SSH connections found. Please add an SSH connection first.")
-            ssh_dialog.destroy()
-            return
-        
-        row = 0
-        ttk.Label(ssh_dialog, text="SSH Connection:").grid(row=row, column=0, sticky="e", padx=5, pady=5)
-        ssh_fields["connection"] = ttk.Combobox(ssh_dialog, width=25, values=ssh_connections, state="readonly")
-        ssh_fields["connection"].grid(row=row, column=1, padx=5, pady=5)
-        ssh_fields["connection"].set(ssh_connections[0])
-        
-        row += 1
-        ttk.Label(ssh_dialog, text="Config Path:").grid(row=row, column=0, sticky="e", padx=5, pady=5)
-        ssh_fields["config_path"] = ttk.Entry(ssh_dialog, width=25)
-        ssh_fields["config_path"].grid(row=row, column=1, padx=5, pady=5)
-        ssh_fields["config_path"].insert(0, "/home/administrator/qlf/odoo/odoo.conf")
+        # If SSH connection is pre-selected, only ask for config path
+        if pre_selected_ssh:
+            ssh_dialog.geometry("400x100")
+            # Center dialog
+            self.root.update_idletasks()
+            x = self.root.winfo_x() + (self.root.winfo_width() // 2) - 200
+            y = self.root.winfo_y() + (self.root.winfo_height() // 2) - 50
+            ssh_dialog.geometry(f"400x100+{x}+{y}")
+            
+            ssh_dialog.transient(self.root)
+            ssh_dialog.grab_set()
+            
+            # Store the pre-selected connection
+            ssh_fields["connection"] = tk.StringVar(value=pre_selected_ssh)
+            
+            row = 0
+            ttk.Label(ssh_dialog, text="Config Path:").grid(row=row, column=0, sticky="e", padx=5, pady=5)
+            ssh_fields["config_path"] = ttk.Entry(ssh_dialog, width=25)
+            ssh_fields["config_path"].grid(row=row, column=1, padx=5, pady=5)
+            ssh_fields["config_path"].insert(0, "/home/administrator/qlf/odoo/odoo.conf")
+            
+            # Add buttons for pre-selected case
+            btn_frame = ttk.Frame(ssh_dialog)
+            btn_frame.grid(row=1, column=0, columnspan=2, pady=20)
+            
+            ttk.Button(btn_frame, text="Connect & Load", 
+                      command=lambda: connect_and_load()).pack(side="left", padx=5)
+            ttk.Button(btn_frame, text="Cancel", 
+                      command=ssh_dialog.destroy).pack(side="left", padx=5)
+        else:
+            # No pre-selected SSH, show both fields
+            ssh_dialog.geometry("400x150")
+            # Center dialog
+            self.root.update_idletasks()
+            x = self.root.winfo_x() + (self.root.winfo_width() // 2) - 200
+            y = self.root.winfo_y() + (self.root.winfo_height() // 2) - 75
+            ssh_dialog.geometry(f"400x150+{x}+{y}")
+            
+            ssh_dialog.transient(self.root)
+            ssh_dialog.grab_set()
+            
+            # Get list of SSH connections
+            ssh_connections = []
+            all_connections = self.conn_manager.list_connections()
+            for conn in all_connections:
+                if conn['type'] == "ssh":
+                    ssh_connections.append(conn['name'])
+            
+            if not ssh_connections:
+                messagebox.showerror("Error", "No SSH connections found. Please add an SSH connection first.")
+                ssh_dialog.destroy()
+                return
+            
+            row = 0
+            ttk.Label(ssh_dialog, text="SSH Connection:").grid(row=row, column=0, sticky="e", padx=5, pady=5)
+            ssh_fields["connection"] = ttk.Combobox(ssh_dialog, width=25, values=ssh_connections, state="readonly")
+            ssh_fields["connection"].grid(row=row, column=1, padx=5, pady=5)
+            ssh_fields["connection"].set(ssh_connections[0])
+            
+            row += 1
+            ttk.Label(ssh_dialog, text="Config Path:").grid(row=row, column=0, sticky="e", padx=5, pady=5)
+            ssh_fields["config_path"] = ttk.Entry(ssh_dialog, width=25)
+            ssh_fields["config_path"].grid(row=row, column=1, padx=5, pady=5)
+            ssh_fields["config_path"].insert(0, "/home/administrator/qlf/odoo/odoo.conf")
+            
+            # Add buttons for non-pre-selected case
+            btn_frame = ttk.Frame(ssh_dialog)
+            btn_frame.grid(row=row + 1, column=0, columnspan=2, pady=20)
+            
+            ttk.Button(btn_frame, text="Connect & Load", 
+                      command=lambda: connect_and_load()).pack(side="left", padx=5)
+            ttk.Button(btn_frame, text="Cancel", 
+                      command=ssh_dialog.destroy).pack(side="left", padx=5)
         
         def connect_and_load():
             try:
                 # Get selected SSH connection
-                selected_ssh_name = ssh_fields["connection"].get()
+                if isinstance(ssh_fields["connection"], tk.StringVar):
+                    selected_ssh_name = ssh_fields["connection"].get()
+                else:
+                    selected_ssh_name = ssh_fields["connection"].get()
                 # Find the SSH connection by name
                 connections = self.conn_manager.list_connections()
                 ssh_conn_id = None
@@ -1188,25 +1264,32 @@ https://github.com/jpsteil/odoo-backup-manager
                     return
                 
                 # Create SSH client
-                ssh = paramiko.SSHClient()
-                ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-                
-                # Connect using selected connection
-                connect_params = {
-                    "hostname": ssh_conn.get("host"),
-                    "port": ssh_conn.get("port", 22),
-                    "username": ssh_conn.get("username"),
-                    "timeout": 10,
-                    "banner_timeout": 10,
-                    "auth_timeout": 10
-                }
-                
-                if ssh_conn.get("ssh_key_path"):
-                    connect_params["key_filename"] = ssh_conn.get("ssh_key_path")
-                elif ssh_conn.get("password"):
-                    connect_params["password"] = ssh_conn.get("password")
-                
-                ssh.connect(**connect_params)
+                ssh = None
+                try:
+                    ssh = paramiko.SSHClient()
+                    ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+                    
+                    # Connect using selected connection
+                    connect_params = {
+                        "hostname": ssh_conn.get("host"),
+                        "port": ssh_conn.get("port", 22),
+                        "username": ssh_conn.get("username"),
+                        "timeout": 10,
+                        "banner_timeout": 10,
+                        "auth_timeout": 10
+                    }
+                    
+                    if ssh_conn.get("ssh_key_path"):
+                        connect_params["key_filename"] = ssh_conn.get("ssh_key_path")
+                    elif ssh_conn.get("password"):
+                        connect_params["password"] = ssh_conn.get("password")
+                    
+                    ssh.connect(**connect_params)
+                except Exception as e:
+                    messagebox.showerror("SSH Connection Failed", f"Failed to connect to SSH server: {str(e)}")
+                    if ssh:
+                        ssh.close()
+                    return
                 
                 # Read the config file
                 sftp = ssh.open_sftp()
@@ -1214,6 +1297,10 @@ https://github.com/jpsteil/odoo-backup-manager
                 
                 with sftp.open(config_path, 'r') as remote_file:
                     config_content = remote_file.read().decode('utf-8')
+                
+                # Get user's home directory while SSH is still connected
+                stdin, stdout, stderr = ssh.exec_command('echo $HOME')
+                user_home = stdout.read().decode('utf-8').strip()
                 
                 sftp.close()
                 ssh.close()
@@ -1252,22 +1339,20 @@ https://github.com/jpsteil/odoo-backup-manager
                     fields["ssh_connection"].config(state="readonly")
                     fields["ssh_connection"].set(selected_ssh_name)
                 
-                # Try to determine remote filestore path
+                # Get filestore path from config
                 data_dir = options.get('data_dir')
                 db_name = options.get('db_name', '')
                 
                 if data_dir and data_dir != 'False':
-                    if db_name and db_name != 'False':
-                        filestore_path = f"{data_dir}/filestore/{db_name}"
-                    else:
-                        filestore_path = f"{data_dir}/filestore"
+                    # Use data_dir EXACTLY as specified in config - DO NOT append anything
+                    filestore_path = data_dir
                 else:
-                    # No data_dir in config, use default based on Odoo version
-                    odoo_version = fields["odoo_version"].get()
+                    # No data_dir in config, use user's home directory (already retrieved)
+                    # Use user's home directory for default filestore path
                     if db_name and db_name != 'False':
-                        filestore_path = f"/var/lib/odoo/.local/share/Odoo/filestore/{db_name}"
+                        filestore_path = f"{user_home}/.local/share/Odoo/filestore/{db_name}"
                     else:
-                        filestore_path = "/var/lib/odoo/.local/share/Odoo/filestore"
+                        filestore_path = f"{user_home}/.local/share/Odoo/filestore"
                 
                 fields["filestore_path"].delete(0, tk.END)
                 fields["filestore_path"].insert(0, filestore_path)
@@ -1276,12 +1361,6 @@ https://github.com/jpsteil/odoo-backup-manager
                 
             except Exception as e:
                 messagebox.showerror("Error", f"Failed to load remote config: {str(e)}")
-        
-        btn_frame = ttk.Frame(ssh_dialog)
-        btn_frame.grid(row=row + 1, column=0, columnspan=2, pady=20)
-        
-        ttk.Button(btn_frame, text="Connect & Load", command=connect_and_load).pack(side="left", padx=5)
-        ttk.Button(btn_frame, text="Cancel", command=ssh_dialog.destroy).pack(side="left", padx=5)
     
     def test_connection_config(self, fields):
         """Test connection from config fields"""
@@ -1566,6 +1645,9 @@ https://github.com/jpsteil/odoo-backup-manager
         dialog = tk.Toplevel(self.root)
         dialog.title(f"Edit Connection: {original_name}")
         
+        # Set fixed size to match Add dialog
+        # Don't set geometry here, will be set after content is built
+        
         # Make dialog modal
         dialog.transient(self.root)
         dialog.resizable(False, False)
@@ -1586,7 +1668,7 @@ https://github.com/jpsteil/odoo-backup-manager
         
         # Connection Details Frame
         details_frame = ttk.LabelFrame(main_frame, text="Connection Details", padding="10")
-        details_frame.pack(fill=tk.BOTH, expand=True, pady=(0, 10))
+        details_frame.pack(fill=tk.BOTH, expand=False, pady=(0, 10))
         
         # Form fields
         row = 0
@@ -1643,8 +1725,18 @@ https://github.com/jpsteil/odoo-backup-manager
         ).grid(row=row, column=1, sticky="w", pady=5)
         row += 1
         
-        # Allow Restore checkbox
-        fields["allow_restore"] = tk.BooleanVar(value=conn.get("allow_restore", False))
+        # Allow Restore checkbox - handle bad data types
+        allow_restore_value = conn.get("allow_restore", False)
+        # Convert to boolean if it's not already (handle datetime strings or other bad data)
+        if not isinstance(allow_restore_value, bool):
+            # Handle integer values (0/1 from database)
+            if isinstance(allow_restore_value, int):
+                allow_restore_value = bool(allow_restore_value)
+            else:
+                # Handle strings and other types
+                str_val = str(allow_restore_value).lower()
+                allow_restore_value = str_val not in ['false', '0', 'none', '', 'null']
+        fields["allow_restore"] = tk.BooleanVar(value=allow_restore_value)
         allow_restore_check = ttk.Checkbutton(
             details_frame, 
             text="Allow Restore Operations (⚠️ Be careful with production databases!)", 
@@ -1657,9 +1749,10 @@ https://github.com/jpsteil/odoo-backup-manager
         
         # SSH Options Frame
         ssh_frame = ttk.LabelFrame(main_frame, text="Remote Server Access", padding="10")
-        ssh_frame.pack(fill=tk.BOTH, expand=True, pady=(0, 10))
+        ssh_frame.pack(fill=tk.BOTH, expand=False, pady=(0, 10))
         
-        fields["use_ssh"] = tk.BooleanVar(value=conn.get("ssh_connection_id") is not None)
+        ssh_conn_id = conn.get("ssh_connection_id")
+        fields["use_ssh"] = tk.BooleanVar(value=ssh_conn_id is not None and ssh_conn_id != "")
         ssh_check = ttk.Checkbutton(
             ssh_frame, 
             text="Use SSH connection for remote server access", 
@@ -1696,6 +1789,11 @@ https://github.com/jpsteil/odoo-backup-manager
                     fields["ssh_connection"].set(name)
                     fields["ssh_connection"].config(state="readonly")
                     break
+            # If we didn't find the SSH connection by ID, it might have been deleted
+            # Set the first available SSH connection
+            if not fields["ssh_connection"].get() and ssh_connections:
+                fields["ssh_connection"].set(ssh_connections[0])
+                fields["ssh_connection"].config(state="readonly")
         elif ssh_connections:
             fields["ssh_connection"].set(ssh_connections[0])
         
@@ -1759,11 +1857,14 @@ https://github.com/jpsteil/odoo-backup-manager
         ttk.Button(button_frame, text="Save", command=save_connection).pack(side=tk.LEFT, padx=5)
         ttk.Button(button_frame, text="Cancel", command=dialog.destroy).pack(side=tk.LEFT, padx=5)
         
-        # Center dialog on parent after it's built
+        # Set size and center dialog on parent after it's built
         dialog.update_idletasks()
-        x = self.root.winfo_x() + (self.root.winfo_width() // 2) - (dialog.winfo_width() // 2)
-        y = self.root.winfo_y() + (self.root.winfo_height() // 2) - (dialog.winfo_height() // 2)
-        dialog.geometry(f"+{x}+{y}")
+        # Force proper size to show all content
+        width = 550
+        height = 680  # Enough for all sections
+        x = self.root.winfo_x() + (self.root.winfo_width() // 2) - (width // 2)
+        y = self.root.winfo_y() + (self.root.winfo_height() // 2) - (height // 2)
+        dialog.geometry(f"{width}x{height}+{x}+{y}")
         
         # Make it modal after geometry is set
         dialog.grab_set()
@@ -2515,14 +2616,26 @@ https://github.com/jpsteil/odoo-backup-manager
         confirm_dialog.transient(self.root)
         confirm_dialog.grab_set()
         
-        # Center the dialog
-        confirm_dialog.geometry("450x300")
-        window_width = 450
-        window_height = 300
-        screen_width = confirm_dialog.winfo_screenwidth()
-        screen_height = confirm_dialog.winfo_screenheight()
-        x = (screen_width - window_width) // 2
-        y = (screen_height - window_height) // 2
+        # Set dialog size - increased height to fit all content
+        window_width = 520
+        window_height = 520  # Increased to fit all neutralization warnings and buttons
+        confirm_dialog.geometry(f"{window_width}x{window_height}")
+        
+        # Center on parent window
+        confirm_dialog.update_idletasks()
+        parent_x = self.root.winfo_x()
+        parent_y = self.root.winfo_y()
+        parent_width = self.root.winfo_width()
+        parent_height = self.root.winfo_height()
+        
+        # Calculate center position relative to parent
+        x = parent_x + (parent_width - window_width) // 2
+        y = parent_y + (parent_height - window_height) // 2
+        
+        # Ensure dialog stays on screen
+        x = max(10, x)
+        y = max(10, y)
+        
         confirm_dialog.geometry(f"{window_width}x{window_height}+{x}+{y}")
         
         # Create the message
@@ -2537,23 +2650,29 @@ https://github.com/jpsteil/odoo-backup-manager
         
         ttk.Separator(msg_frame, orient="horizontal").pack(fill="x", pady=10)
         
-        ttk.Label(msg_frame, text="This will:", font=("TkDefaultFont", 9, "bold")).pack(anchor="w", pady=(0, 5))
-        ttk.Label(msg_frame, text=f"• Drop and recreate database: {dest_config['db_name']}").pack(anchor="w", padx=(20, 0), pady=2)
+        ttk.Label(msg_frame, text="⚠️ WARNING - This will PERMANENTLY DELETE:", 
+                 font=("TkDefaultFont", 10, "bold"), foreground="#CC0000").pack(anchor="w", pady=(0, 5))
+        ttk.Label(msg_frame, text=f"• Database: {dest_config['db_name']}", 
+                 foreground="#CC0000").pack(anchor="w", padx=(20, 0), pady=2)
         
         if not dest_config.get('filestore_only', False) and dest_config.get('filestore_path'):
-            ttk.Label(msg_frame, text=f"• Replace filestore at: {dest_config['filestore_path']}").pack(anchor="w", padx=(20, 0), pady=2)
-            ttk.Label(msg_frame, text="  (Existing filestore will be backed up)", 
-                     font=("TkDefaultFont", 8, "italic")).pack(anchor="w", padx=(20, 0), pady=2)
+            ttk.Label(msg_frame, text=f"• Filestore at: {dest_config['filestore_path']}/filestore/{dest_config['db_name']}", 
+                     foreground="#CC0000").pack(anchor="w", padx=(20, 0), pady=2)
+        
+        ttk.Label(msg_frame, text="", font=("TkDefaultFont", 1)).pack()  # Small spacer
+        ttk.Label(msg_frame, text="⚠️ BACKUP YOUR DATA FIRST IF YOU NEED IT!", 
+                 font=("TkDefaultFont", 9, "bold"), foreground="#CC0000").pack(anchor="w", pady=2)
         
         # Show neutralization warning if enabled
         if self.neutralize.get():
             ttk.Label(msg_frame, text="").pack(pady=5)  # Spacer
             ttk.Label(msg_frame, text="⚠️ NEUTRALIZATION ENABLED:", 
-                     font=("TkDefaultFont", 10, "bold"), foreground="orange").pack(anchor="w", pady=2)
-            ttk.Label(msg_frame, text="• All emails will be disabled", foreground="orange").pack(anchor="w", padx=(20, 0), pady=2)
-            ttk.Label(msg_frame, text="• All scheduled actions (crons) will be disabled", foreground="orange").pack(anchor="w", padx=(20, 0), pady=2)
-            ttk.Label(msg_frame, text="• Admin password will be reset to 'admin'", foreground="orange").pack(anchor="w", padx=(20, 0), pady=2)
-            ttk.Label(msg_frame, text="• All user passwords will be reset to 'demo'", foreground="orange").pack(anchor="w", padx=(20, 0), pady=2)
+                     font=("TkDefaultFont", 10, "bold"), foreground="#CC0000").pack(anchor="w", pady=2)
+            ttk.Label(msg_frame, text="• All email servers will be disabled", foreground="#CC0000").pack(anchor="w", padx=(20, 0), pady=2)
+            ttk.Label(msg_frame, text="• Email configurations will be removed", foreground="#CC0000").pack(anchor="w", padx=(20, 0), pady=2)
+            ttk.Label(msg_frame, text="• All email queues will be cleared", foreground="#CC0000").pack(anchor="w", padx=(20, 0), pady=2)
+            ttk.Label(msg_frame, text="• All scheduled actions (crons) will be disabled", foreground="#CC0000").pack(anchor="w", padx=(20, 0), pady=2)
+            ttk.Label(msg_frame, text="• Company name will be prefixed with [TEST]", foreground="#CC0000").pack(anchor="w", padx=(20, 0), pady=2)
         
         # Result variable
         result = {"confirmed": False}

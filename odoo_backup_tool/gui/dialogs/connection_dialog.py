@@ -52,10 +52,52 @@ class ConnectionDialog(tk.Toplevel):
     def center_window(self):
         """Center dialog on parent window"""
         self.update_idletasks()
-        x = (self.parent.winfo_x() + (self.parent.winfo_width() // 2) - 
-             (self.winfo_width() // 2))
-        y = (self.parent.winfo_y() + (self.parent.winfo_height() // 2) - 
-             (self.winfo_height() // 2))
+        
+        # Get parent position and size
+        parent_x = self.parent.winfo_x()
+        parent_y = self.parent.winfo_y()
+        parent_width = self.parent.winfo_width()
+        parent_height = self.parent.winfo_height()
+        
+        # Get dialog size
+        dialog_width = self.winfo_width()
+        dialog_height = self.winfo_height()
+        
+        # Calculate position - center on parent
+        x = parent_x + (parent_width - dialog_width) // 2
+        y = parent_y + (parent_height - dialog_height) // 2
+        
+        # Get screen dimensions
+        screen_width = self.winfo_screenwidth()
+        screen_height = self.winfo_screenheight()
+        
+        # For multi-monitor setups, ensure dialog stays on the same monitor as parent
+        # Check if we're likely in a multi-monitor setup (width > 2x height suggests side-by-side)
+        if screen_width > screen_height * 2:
+            # Likely multi-monitor side-by-side
+            primary_width = screen_width // 2
+            
+            # Determine which monitor the parent is on
+            parent_center_x = parent_x + parent_width // 2
+            
+            if parent_center_x < primary_width:
+                # Parent is on left (primary) monitor
+                # Ensure dialog doesn't go past right edge of primary monitor
+                x = min(x, primary_width - dialog_width - 10)
+                x = max(10, x)  # At least 10px from left edge
+            else:
+                # Parent is on right (secondary) monitor
+                # Ensure dialog stays on right monitor
+                x = max(x, primary_width + 10)
+                x = min(x, screen_width - dialog_width - 10)
+        else:
+            # Single monitor or vertical setup
+            # Just ensure we don't go off screen
+            x = max(10, min(x, screen_width - dialog_width - 10))
+        
+        # Ensure vertical position is reasonable
+        y = max(10, min(y, screen_height - dialog_height - 10))
+        
         self.geometry(f"+{x}+{y}")
     
     def create_widgets(self):
