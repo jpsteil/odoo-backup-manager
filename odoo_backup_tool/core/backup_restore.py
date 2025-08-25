@@ -647,18 +647,50 @@ class OdooBackupRestore:
             # Create parent directory if it doesn't exist
             os.makedirs(filestore_path, exist_ok=True)
 
-            # Extract filestore archive
-            with tarfile.open(filestore_archive, "r:gz") as tar:
-                # Clear existing filestore if exists
-                db_filestore_path = os.path.join(
-                    filestore_path, "filestore", config["db_name"]
-                )
-                if os.path.exists(db_filestore_path):
-                    self.log(f"Removing existing filestore: {db_filestore_path}")
-                    shutil.rmtree(db_filestore_path, ignore_errors=True)
-
-                # Extract to filestore path
-                tar.extractall(filestore_path)
+            # Extract filestore archive to temp location first
+            with tempfile.TemporaryDirectory() as temp_dir:
+                with tarfile.open(filestore_archive, "r:gz") as tar:
+                    # Extract to temp directory
+                    tar.extractall(temp_dir)
+                
+                # Find the extracted filestore directory
+                temp_filestore = os.path.join(temp_dir, "filestore")
+                if not os.path.exists(temp_filestore):
+                    # Sometimes the archive might not have the 'filestore' parent
+                    # Check if there's a direct database directory
+                    extracted_items = os.listdir(temp_dir)
+                    if len(extracted_items) == 1 and os.path.isdir(os.path.join(temp_dir, extracted_items[0])):
+                        # Move it to the expected structure
+                        os.makedirs(temp_filestore)
+                        shutil.move(os.path.join(temp_dir, extracted_items[0]), 
+                                  os.path.join(temp_filestore, extracted_items[0]))
+                
+                if os.path.exists(temp_filestore):
+                    # Get the source database name from the extracted archive
+                    extracted_dirs = [d for d in os.listdir(temp_filestore) 
+                                    if os.path.isdir(os.path.join(temp_filestore, d))]
+                    
+                    if extracted_dirs:
+                        source_db_name = extracted_dirs[0]  # Should only be one
+                        source_path = os.path.join(temp_filestore, source_db_name)
+                        target_path = os.path.join(filestore_path, "filestore", config["db_name"])
+                        
+                        # Now remove the existing filestore if it exists
+                        if os.path.exists(target_path):
+                            self.log(f"Removing existing filestore: {target_path}")
+                            shutil.rmtree(target_path, ignore_errors=True)
+                        
+                        # Create the filestore directory structure if needed
+                        os.makedirs(os.path.dirname(target_path), exist_ok=True)
+                        
+                        # Move the extracted filestore to the correct location with correct name
+                        self.log(f"Moving filestore from '{source_db_name}' to '{config['db_name']}'")
+                        shutil.move(source_path, target_path)
+                        self.log(f"Filestore moved successfully")
+                    else:
+                        raise Exception("No database directory found in extracted filestore")
+                else:
+                    raise Exception("No filestore directory found in archive")
 
             self.log("Filestore restored successfully")
             self.update_progress(90, "Filestore restore complete")
