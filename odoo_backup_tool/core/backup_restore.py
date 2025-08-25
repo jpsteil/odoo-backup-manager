@@ -822,72 +822,16 @@ class OdooBackupRestore:
             if config.get("db_password"):
                 env["PGPASSWORD"] = config["db_password"]
             
-            # SQL queries to fix icon display issues (version-agnostic)
+            # MINIMAL SQL to fix icon display - only what's needed
             cleanup_sql = """
-            -- Clear only icon-specific attachments (safe to delete)
+            -- Clear icon-related attachments (these regenerate safely)
             DELETE FROM ir_attachment 
             WHERE res_model = 'ir.ui.menu' 
-              AND (res_field = 'web_icon_data' OR res_field = 'web_icon' OR name LIKE '%icon%');
+              AND res_field IN ('web_icon', 'web_icon_data');
             
-            -- Clear any compiled asset bundles containing icons
-            DELETE FROM ir_attachment 
-            WHERE (name LIKE '/web/assets/%' OR name LIKE '/web/content/%')
-              AND (name LIKE '%icon%' OR name LIKE '%font%' OR name LIKE '%awesome%');
-            
-            -- Reset web icon data if the column exists (version-dependent)
-            DO $$
-            BEGIN
-                IF EXISTS (
-                    SELECT 1 
-                    FROM information_schema.columns 
-                    WHERE table_name = 'ir_ui_menu' 
-                    AND column_name = 'web_icon_data'
-                ) THEN
-                    UPDATE ir_ui_menu 
-                    SET web_icon_data = NULL 
-                    WHERE web_icon IS NOT NULL
-                      AND web_icon LIKE '%static/%';
-                END IF;
-            END $$;
-            
-            -- Reset asset bundle timestamps to force regeneration
-            UPDATE ir_attachment 
-            SET write_date = NOW() 
-            WHERE name LIKE '%assets%' AND res_model = 'ir.ui.view';
-            
-            -- Update system parameters for proper base URL
-            DO $$
-            DECLARE
-                base_url_exists BOOLEAN;
-            BEGIN
-                -- Check if web.base.url parameter exists
-                SELECT EXISTS(
-                    SELECT 1 FROM ir_config_parameter 
-                    WHERE key = 'web.base.url'
-                ) INTO base_url_exists;
-                
-                -- If it exists but is frozen, unfreeze it
-                IF base_url_exists THEN
-                    DELETE FROM ir_config_parameter 
-                    WHERE key = 'web.base.url.freeze';
-                END IF;
-            END $$;
-            
-            -- Force cache refresh for all menu-related assets
-            UPDATE ir_attachment 
-            SET write_date = NOW() - interval '1 day'
-            WHERE res_model IN ('ir.ui.menu', 'ir.module.module')
-              AND (name LIKE '%icon%' OR name LIKE '%logo%' OR res_field LIKE '%icon%');
-            
-            -- Clear translation cache for menus (forces icon reload)
-            DELETE FROM ir_translation 
-            WHERE name LIKE 'ir.ui.menu,%' 
-              AND name LIKE '%web_icon%';
-            
-            -- Invalidate the module icon cache (works across versions)
-            UPDATE ir_module_module 
-            SET write_date = NOW() - interval '1 day'
-            WHERE icon IS NOT NULL;
+            -- Unfreeze base URL if frozen (common restore issue)
+            DELETE FROM ir_config_parameter 
+            WHERE key = 'web.base.url.freeze';
             """
             
             # Execute cleanup queries
@@ -919,12 +863,10 @@ class OdooBackupRestore:
                         self.log(f"Warning: Could not clear asset cache: {e}", "warning")
             
             self.log("Post-restore cleanup complete:", "success")
-            self.log("  ✓ Asset attachments cleared for regeneration", "info")
-            self.log("  ✓ Menu icon cache cleared", "info")
-            self.log("  ✓ QWeb template cache cleared", "info")
-            self.log("  ✓ System parameters updated", "info")
-            self.log("  ✓ Filestore asset cache cleared", "info")
-            self.log("", "info")
+            self.log("  ✓ Menu icon attachments cleared", "info")
+            self.log("  ✓ Base URL unfrozen", "info")
+            if config.get("filestore_path"):
+                self.log("  ✓ Filestore asset cache cleared", "info")
             self.log("NOTE: Icons will regenerate on first access to Odoo", "info")
             
             self.update_progress(95, "Cleanup complete")
