@@ -152,7 +152,7 @@ Examples:
     )
     restore_parser.add_argument(
         "--neutralize", action="store_true", 
-        help="Neutralize database for testing (disable emails, reset passwords, etc.)"
+        help="Neutralize database for testing (disable emails, crons, payment providers, etc.)"
     )
 
     # Connections management
@@ -410,8 +410,9 @@ def handle_restore(args):
                 print("🧪 Database has been neutralized for testing:")
                 print("   - All outgoing mail servers disabled")
                 print("   - All scheduled actions (crons) disabled")
-                print("   - Admin password reset to 'admin'")
-                print("   - All user passwords reset to 'demo'")
+                print("   - Payment acquirers disabled")
+                print("   - Email queue cleared")
+                print("   - Company names prefixed with [TEST]")
     except Exception as e:
         print(f"❌ Restore failed: {e}")
         sys.exit(1)

@@ -2,6 +2,15 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.5.12] - 2025-01-25
+
+### Documentation
+- Updated CLI help text to accurately describe neutralization features
+- Updated GUI help dialog to remove incorrect password reset claims
+- Updated README to correctly list what gets neutralized
+- Removed all references to password resets from documentation
+- Added proper description of actual neutralization features
+
 ## [1.5.11] - 2025-01-25
 
 ### Fixed

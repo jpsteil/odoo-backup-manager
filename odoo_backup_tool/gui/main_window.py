@@ -755,12 +755,11 @@ This feature is crucial when restoring production data to test/development envir
 What Gets Neutralized:
 • All outgoing mail servers - Disabled to prevent sending emails
 • All scheduled actions (crons) - Disabled to prevent automated tasks
-• Admin password - Reset to 'admin' for easy access
-• All user passwords - Reset to 'demo' (except admin and system users)
 • Payment acquirers - Disabled to prevent payment processing
 • Email queue - Cleared of any pending/failed emails
 • Website indexing - Robots.txt set to disallow all crawlers
 • Company names - Prefixed with [TEST] to identify as test environment
+• Base URL - Unfrozen to allow configuration changes
 
 ⚠️ WARNING: Neutralization modifies the database. Only use on test/development systems!
 

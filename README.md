@@ -17,7 +17,7 @@ A comprehensive backup and restore utility for Odoo instances with smart GUI/CLI
 - 📦 **Archive Management**: Creates compressed archives with metadata
 - 🔄 **Flexible Operations**: Backup only, restore only, or backup & restore in one operation
 - 🛡️ **Production Protection**: Prevent accidental restores to production databases
-- 🧪 **Database Neutralization**: Safe testing with disabled emails and reset passwords
+- 🧪 **Database Neutralization**: Safe testing with disabled emails, crons, and payment providers
 
 ## Installation
 
@@ -200,9 +200,10 @@ When using the `--neutralize` flag during restore, the following safety measures
 
 - ✉️ All outgoing mail servers are disabled
 - ⏰ All scheduled actions (crons) are disabled  
-- 🔑 Admin password is reset to 'admin'
-- 👥 All user passwords are reset to 'demo'
-- 🔔 All notification channels are disabled
+- 💳 Payment acquirers are disabled
+- 📧 Email queue is cleared
+- 🏢 Company names are prefixed with [TEST]
+- 🔗 Base URL configuration is unfrozen
 
 This ensures your test database won't send emails or execute scheduled tasks.
 
