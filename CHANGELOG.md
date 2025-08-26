@@ -2,6 +2,19 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.5.14] - 2025-01-26
+
+### Added
+- Keyboard shortcuts for all dialogs (Escape to cancel, Enter for default action)
+- Auto-focus on first field when dialogs open
+- Auto-select existing text in focused fields for easy overwriting
+- Proper modal dialog behavior with transient and grab_set
+
+### Improved
+- GUI window layout - log area now properly expands to use available space
+- Dialog keyboard navigation and usability
+- Safer defaults (No button focused on dangerous confirmations)
+
 ## [1.5.12] - 2025-01-25
 
 ### Documentation

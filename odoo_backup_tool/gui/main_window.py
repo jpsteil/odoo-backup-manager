@@ -23,11 +23,8 @@ class OdooBackupRestoreGUI:
     def __init__(self, root):
         self.root = root
         self.root.title("Odoo Backup & Restore Manager")
-        # Let tkinter auto-size the window based on content
-        # Set minimum size to prevent window from being too small
-        self.root.minsize(800, 600)
-        # Optional: Set maximum size if needed
-        # self.root.maxsize(1400, 900)
+        # Let window size naturally to content
+        self.root.resizable(True, True)
 
         # Set style
         style = ttk.Style()
@@ -137,15 +134,48 @@ class OdooBackupRestoreGUI:
             self.conn_manager.set_setting('backup_directory', self.backup_directory)
         except Exception as e:
             print(f"Error saving config: {e}")
+    
+    def setup_dialog_bindings(self, dialog, cancel_command=None, accept_command=None, first_field=None):
+        """Setup standard keyboard bindings for dialogs
+        
+        Args:
+            dialog: The Toplevel dialog window
+            cancel_command: Function to call on Escape (defaults to dialog.destroy)
+            accept_command: Function to call on Enter
+            first_field: Widget to focus on when dialog opens
+        """
+        # Set up Escape key to cancel
+        if cancel_command is None:
+            cancel_command = dialog.destroy
+        dialog.bind('<Escape>', lambda e: cancel_command())
+        
+        # Set up Enter key for default action
+        if accept_command:
+            dialog.bind('<Return>', lambda e: accept_command())
+        
+        # Focus on first field if provided
+        if first_field:
+            def set_focus_and_select():
+                first_field.focus_set()
+                # If it's an Entry widget, select all text
+                if hasattr(first_field, 'select_range'):
+                    first_field.select_range(0, 'end')
+                elif hasattr(first_field, 'selection_range'):
+                    first_field.selection_range(0, 'end')
+            dialog.after(100, set_focus_and_select)
+        
+        # Make dialog modal
+        dialog.transient(self.root)
+        dialog.grab_set()
 
     def create_backup_restore_tab(self):
         """Create the main backup/restore tab"""
         tab = ttk.Frame(self.notebook)
         self.notebook.add(tab, text="Backup & Restore")
 
-        # Create main container - don't expand vertically
+        # Create main container
         main_container = ttk.Frame(tab, padding="10")
-        main_container.pack(fill="both", expand=False, anchor="n")
+        main_container.pack(fill="both", expand=True)
 
         # Operation Mode (moved to top)
         self.mode_frame = ttk.LabelFrame(main_container, text="Operation Mode", padding="10")
@@ -285,11 +315,11 @@ class OdooBackupRestoreGUI:
         self.progress_bar = ttk.Progressbar(progress_frame, mode="determinate")
         self.progress_bar.pack(fill="x", pady=5)
 
-        # Log - expand to fill available space
+        # Log - takes remaining space
         log_frame = ttk.LabelFrame(main_container, text="Output Log", padding="5")
         log_frame.pack(fill="both", expand=True, pady=5)
 
-        # Remove fixed height to allow expansion
+        # Let log expand to fill available space
         self.log_text = scrolledtext.ScrolledText(log_frame, wrap=tk.WORD)
         self.log_text.pack(fill="both", expand=True)
 
@@ -1094,8 +1124,11 @@ https://github.com/jpsteil/odoo-backup-manager
         y = self.root.winfo_y() + (self.root.winfo_height() // 2) - (dialog.winfo_height() // 2)
         dialog.geometry(f"+{x}+{y}")
         
-        # Make it modal after geometry is set
-        dialog.grab_set()
+        # Setup keyboard bindings and focus
+        self.setup_dialog_bindings(dialog, 
+                                 cancel_command=dialog.destroy,
+                                 accept_command=save_connection,
+                                 first_field=fields.get("name"))
 
     def load_from_odoo_conf(self, fields):
         """Load connection settings from odoo.conf file - local or remote based on SSH checkbox"""
@@ -1540,9 +1573,6 @@ https://github.com/jpsteil/odoo-backup-manager
         y = self.root.winfo_y() + (self.root.winfo_height() // 2) - (height // 2)
         dialog.geometry(f"{width}x{height}+{x}+{y}")
         
-        dialog.transient(self.root)
-        dialog.grab_set()
-        
         fields = {}
         row = 0
         
@@ -1616,6 +1646,12 @@ https://github.com/jpsteil/odoo-backup-manager
         ttk.Button(btn_frame, text="Test SSH", command=lambda: self.test_ssh_from_dialog(fields)).pack(side="left", padx=5)
         ttk.Button(btn_frame, text="Save", command=save_ssh_connection).pack(side="left", padx=5)
         ttk.Button(btn_frame, text="Cancel", command=dialog.destroy).pack(side="left", padx=5)
+        
+        # Setup keyboard bindings and focus
+        self.setup_dialog_bindings(dialog,
+                                 cancel_command=dialog.destroy,
+                                 accept_command=save_ssh_connection,
+                                 first_field=fields["name"])
     
     def edit_odoo_connection(self):
         """Edit selected Odoo connection"""
@@ -1865,8 +1901,11 @@ https://github.com/jpsteil/odoo-backup-manager
         y = self.root.winfo_y() + (self.root.winfo_height() // 2) - (height // 2)
         dialog.geometry(f"{width}x{height}+{x}+{y}")
         
-        # Make it modal after geometry is set
-        dialog.grab_set()
+        # Setup keyboard bindings and focus
+        self.setup_dialog_bindings(dialog,
+                                 cancel_command=dialog.destroy,
+                                 accept_command=save_connection,
+                                 first_field=fields.get("name"))
     
     def edit_ssh_connection(self):
         """Edit selected SSH connection"""
@@ -1989,6 +2028,12 @@ https://github.com/jpsteil/odoo-backup-manager
         ttk.Button(btn_frame, text="Test SSH", command=lambda: self.test_ssh_from_dialog(fields)).pack(side="left", padx=5)
         ttk.Button(btn_frame, text="Save", command=save_ssh_connection).pack(side="left", padx=5)
         ttk.Button(btn_frame, text="Cancel", command=dialog.destroy).pack(side="left", padx=5)
+        
+        # Setup keyboard bindings and focus
+        self.setup_dialog_bindings(dialog,
+                                 cancel_command=dialog.destroy,
+                                 accept_command=save_ssh_connection,
+                                 first_field=fields["name"])
     
     def delete_odoo_connection(self):
         """Delete selected Odoo connection"""
@@ -2269,6 +2314,9 @@ https://github.com/jpsteil/odoo-backup-manager
         # Load connection details
         self.load_connection("source")
         
+        # Update window size after loading connection details
+        self.update_window_size()
+        
         # If in backup-only mode, set default backup filename
         if self.operation_mode.get() == "backup_only":
             conn_name = self.source_conn.get()
@@ -2286,6 +2334,11 @@ https://github.com/jpsteil/odoo-backup-manager
                 # Set the backup file path
                 self.backup_file_var.set(default_filename)
     
+    def update_window_size(self):
+        """Force window to recalculate its natural size after showing/hiding elements"""
+        self.root.update_idletasks()  # Force geometry calculation
+        # Don't set geometry - let window auto-size to content
+        
     def update_operation_ui(self):
         """Update UI based on selected operation mode"""
         mode = self.operation_mode.get()
@@ -2327,11 +2380,17 @@ https://github.com/jpsteil/odoo-backup-manager
             self.execute_btn.config(text="Execute Restore")
             # Refresh available restore files for the selected destination
             self.refresh_restore_files()
+            
+        # Update window size after UI changes
+        self.update_window_size()
     
     def on_dest_selected(self):
         """Handle destination connection selection"""
         # Load the connection details
         self.load_connection("dest")
+        
+        # Update window size after loading connection details
+        self.update_window_size()
         
         # If in restore_only mode, refresh the restore files dropdown
         if self.operation_mode.get() == "restore_only":
@@ -2687,8 +2746,19 @@ https://github.com/jpsteil/odoo-backup-manager
         btn_frame = ttk.Frame(confirm_dialog)
         btn_frame.pack(side="bottom", pady=20)
         
-        ttk.Button(btn_frame, text="Yes", command=on_yes, width=12).pack(side="left", padx=10)
-        ttk.Button(btn_frame, text="No", command=on_no, width=12).pack(side="left", padx=10)
+        # Yes button (with danger styling)
+        yes_btn = ttk.Button(btn_frame, text="Yes", command=on_yes, width=12)
+        yes_btn.pack(side="left", padx=10)
+        
+        # No button (default)
+        no_btn = ttk.Button(btn_frame, text="No", command=on_no, width=12)
+        no_btn.pack(side="left", padx=10)
+        
+        # Setup keyboard bindings (No is the safe default for Enter)
+        self.setup_dialog_bindings(confirm_dialog,
+                                 cancel_command=on_no,
+                                 accept_command=on_no,  # Safe default
+                                 first_field=no_btn)  # Focus on No button
         
         # Wait for dialog to close
         self.root.wait_window(confirm_dialog)
