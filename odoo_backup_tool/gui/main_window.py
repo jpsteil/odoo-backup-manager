@@ -2852,10 +2852,9 @@ https://github.com/jpsteil/odoo-backup-manager
             "filestore_path": source_conn["filestore_path"],
             "odoo_version": source_conn.get("odoo_version", ""),
             "db_only": self.db_only.get(),
-            "save_backup": self.save_backup.get(),
-            "backup_dir": (
-                self.backup_dir_path.get() if self.save_backup.get() else None
-            ),
+            "filestore_only": self.filestore_only.get(),
+            "save_backup": True,  # Always save backup in backup & restore mode
+            "backup_dir": self.backup_dir_path.get(),  # Always use backup directory
             "use_ssh": source_conn.get("use_ssh", False),
             "ssh_connection_id": source_conn.get("ssh_connection_id"),
         }

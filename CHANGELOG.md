@@ -2,6 +2,22 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.5.15] - 2025-01-26
+
+### Fixed
+- Fixed NoneType error in backup & restore operations when backup_dir was None
+- Fixed missing filestore_only flag in backup & restore configuration
+- Fixed remote SSH filestore backup to use correct database-specific path
+- Backup & restore now properly saves backup files to backup directory
+- Added proper error handling for remote SSH cleanup operations
+- Fixed db_only and filestore_only flags not being respected in backup function
+
+### Improved
+- Backup & restore operations now always save backup archives for audit trail
+- Better path validation in filestore backup operations
+- More robust error handling during remote file cleanup
+- Filestore path now correctly appends database name for remote backups
+
 ## [1.5.14] - 2025-01-26
 
 ### Added

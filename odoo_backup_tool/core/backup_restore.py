@@ -277,9 +277,17 @@ class OdooBackupRestore:
                 # For database, get the database size from PostgreSQL
                 return 100  # Default estimate for database
             else:
+                # Check if path is valid
+                if not path:
+                    self.log("Warning: Path is empty, using default estimate", "warning")
+                    return 100
                 # For filestore, get directory size
                 stdin, stdout, stderr = ssh.exec_command(f"du -sm '{path}' | cut -f1")
-                size_mb = int(stdout.read().decode().strip())
+                output = stdout.read().decode().strip()
+                if not output or not output.isdigit():
+                    self.log(f"Warning: Could not get size for {path}, using default estimate", "warning")
+                    return 100
+                size_mb = int(output)
                 # Estimate compression ratio (typically 30-50% for filestore)
                 compressed_estimate = size_mb * 0.4
                 return compressed_estimate
@@ -323,7 +331,7 @@ class OdooBackupRestore:
 
     def backup_filestore(self, config):
         """Backup Odoo filestore"""
-        filestore_path = config["filestore_path"]
+        filestore_path = config.get("filestore_path")
 
         if not filestore_path:
             self.log("Warning: Filestore path not specified", "warning")
@@ -343,7 +351,15 @@ class OdooBackupRestore:
             self.log("Error: SSH connection not found", "error")
             return None
 
-        self.log(f"Backing up remote filestore via SSH: {filestore_path}...")
+        # Build full filestore path with database name
+        db_name = config.get("db_name", "")
+        if db_name and not filestore_path.endswith(db_name):
+            # Append filestore/db_name if not already there
+            full_filestore_path = os.path.join(filestore_path, "filestore", db_name)
+        else:
+            full_filestore_path = filestore_path
+            
+        self.log(f"Backing up remote filestore via SSH: {full_filestore_path}...")
         self.update_progress(50, "Backing up remote filestore...")
 
         try:
@@ -355,15 +371,20 @@ class OdooBackupRestore:
 
             # Check filestore path
             self.log("Checking remote filestore path...")
-            stdin, stdout, stderr = ssh.exec_command(f"test -d '{filestore_path}'")
+            stdin, stdout, stderr = ssh.exec_command(f"test -d '{full_filestore_path}'")
             if stdout.channel.recv_exit_status() != 0:
                 # Path doesn't exist - log warning but use as-is
-                self.log(f"Warning: Filestore path does not exist: {filestore_path}", "warning")
+                self.log(f"Warning: Filestore path does not exist: {full_filestore_path}", "warning")
 
             # Estimate and check disk space
             self.log("Estimating backup size...")
+            # Check if full_filestore_path is valid before estimating
+            if not full_filestore_path:
+                self.log("Error: Filestore path is empty or None", "error")
+                ssh.close()
+                return None
             estimated_size = self.estimate_compressed_size(
-                ssh, filestore_path, is_database=False
+                ssh, full_filestore_path, is_database=False
             )
 
             has_space, available_mb, required_mb = self.check_remote_disk_space(
@@ -383,7 +404,7 @@ class OdooBackupRestore:
             self.log("Creating remote archive...")
 
             stdin, stdout, stderr = ssh.exec_command(
-                f"cd '{filestore_path}' && tar -czf {remote_temp} ."
+                f"cd '{full_filestore_path}' && tar -czf {remote_temp} ."
             )
             exit_status = stdout.channel.recv_exit_status()
 
@@ -406,9 +427,14 @@ class OdooBackupRestore:
 
             finally:
                 # Always clean up remote temp file
-                self.log("Cleaning up remote temporary files...")
-                ssh.exec_command(f"rm -f {remote_temp}")
-                ssh.close()
+                try:
+                    self.log("Cleaning up remote temporary files...")
+                    if ssh and remote_temp:
+                        ssh.exec_command(f"rm -f {remote_temp}")
+                    if ssh:
+                        ssh.close()
+                except Exception as cleanup_error:
+                    self.log(f"Warning: Error during cleanup: {cleanup_error}", "warning")
 
         except Exception as e:
             self.log(f"Error backing up remote filestore: {str(e)}", "error")
@@ -438,7 +464,9 @@ class OdooBackupRestore:
     def create_backup_archive(self, config, db_dump, filestore_archive):
         """Create combined backup archive"""
         backup_name = f"backup_{config['db_name'].upper()}_{self.timestamp}.tar.gz"
-        backup_path = os.path.join(config.get("backup_dir", self.temp_dir), backup_name)
+        # Use temp_dir if backup_dir is None or not specified
+        backup_dir = config.get("backup_dir") or self.temp_dir
+        backup_path = os.path.join(backup_dir, backup_name)
 
         self.log(f"Creating backup archive: {backup_name}...")
         self.update_progress(80, "Creating archive...")
@@ -752,11 +780,17 @@ class OdooBackupRestore:
             self.check_dependencies()
 
             # Backup database
-            db_dump = self.backup_database(config)
+            db_dump = None
+            # Skip database if filestore_only is True
+            if not config.get("filestore_only", False):
+                db_dump = self.backup_database(config)
 
             # Backup filestore
             filestore_archive = None
-            if config.get("backup_filestore", True):
+            # Handle both old and new config formats
+            # Skip filestore if db_only is True or if backup_filestore is explicitly False
+            should_backup_filestore = not config.get("db_only", False) and config.get("backup_filestore", True)
+            if should_backup_filestore:
                 filestore_archive = self.backup_filestore(config)
 
             # Create combined archive
