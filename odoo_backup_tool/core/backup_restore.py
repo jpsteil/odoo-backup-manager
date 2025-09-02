@@ -11,6 +11,7 @@ import tempfile
 import json
 import zipfile
 import configparser
+import uuid
 from datetime import datetime
 from pathlib import Path
 import paramiko
@@ -668,7 +669,15 @@ class OdooBackupRestore:
             self.log("Warning: Filestore path not specified", "warning")
             return False
 
-        self.log(f"Restoring filestore to: {filestore_path}...")
+        # Check if we need to use SSH
+        if config.get("use_ssh") and config.get("ssh_connection_id"):
+            return self._restore_remote_filestore(config, filestore_path, filestore_archive)
+        else:
+            return self._restore_local_filestore(config, filestore_path, filestore_archive)
+    
+    def _restore_local_filestore(self, config, filestore_path, filestore_archive):
+        """Restore filestore locally"""
+        self.log(f"Restoring filestore locally to: {filestore_path}...")
         self.update_progress(75, "Restoring filestore...")
 
         try:
@@ -768,6 +777,152 @@ class OdooBackupRestore:
 
         except Exception as e:
             self.log(f"Error restoring filestore: {str(e)}", "error")
+            return False
+
+    def _restore_remote_filestore(self, config, filestore_path, filestore_archive):
+        """Restore filestore to remote server via SSH"""
+        ssh_conn_id = config.get("ssh_connection_id")
+        if not ssh_conn_id:
+            self.log("SSH connection ID not provided", "error")
+            return False
+        
+        ssh_conn = self.conn_manager.get_ssh_connection(ssh_conn_id)
+        if not ssh_conn:
+            self.log(f"SSH connection {ssh_conn_id} not found", "error")
+            return False
+
+        self.log(f"Restoring filestore to remote server via SSH: {filestore_path}...")
+        self.update_progress(75, "Restoring filestore via SSH...")
+
+        try:
+            # Get SSH client connection
+            ssh = self._get_ssh_client(ssh_conn)
+            # Build the full remote path with database name
+            db_name = config.get("db_name", "")
+            if not db_name:
+                raise Exception("Database name is required for remote filestore restore")
+            
+            # Ensure filestore_path ends with /filestore/DATABASE_NAME
+            if not filestore_path.endswith(db_name):
+                if filestore_path.endswith("filestore"):
+                    remote_target = os.path.join(filestore_path, db_name)
+                elif filestore_path.endswith("/"):
+                    remote_target = os.path.join(filestore_path, "filestore", db_name)
+                else:
+                    remote_target = os.path.join(filestore_path, "filestore", db_name)
+            else:
+                remote_target = filestore_path
+            
+            self.log(f"Remote target path: {remote_target}")
+
+            # Create a unique remote temp directory
+            remote_temp_dir = f"/tmp/odoo_restore_{uuid.uuid4().hex[:8]}"
+            remote_archive = os.path.join(remote_temp_dir, "filestore.tar.gz")
+            
+            # Create remote temp directory
+            stdin, stdout, stderr = ssh.exec_command(f"mkdir -p {remote_temp_dir}")
+            stdout.read()
+            
+            # Upload the filestore archive to remote server
+            self.log(f"Uploading filestore archive to remote server...")
+            sftp = ssh.open_sftp()
+            try:
+                sftp.put(filestore_archive, remote_archive)
+                self.log("Archive uploaded successfully")
+            finally:
+                sftp.close()
+            
+            # Extract the archive on the remote server
+            self.log("Extracting filestore archive on remote server...")
+            extract_cmd = f"cd {remote_temp_dir} && tar -xzf filestore.tar.gz"
+            stdin, stdout, stderr = ssh.exec_command(extract_cmd)
+            stdout.read()
+            error = stderr.read().decode()
+            if error and "Cannot" in error:
+                raise Exception(f"Failed to extract archive: {error}")
+            
+            # Determine the structure of the extracted archive
+            list_cmd = f"ls -la {remote_temp_dir}"
+            stdin, stdout, stderr = ssh.exec_command(list_cmd)
+            ls_output = stdout.read().decode()
+            
+            # Check if we have filestore directory or direct hash directories
+            check_filestore_cmd = f"test -d {remote_temp_dir}/filestore && echo 'HAS_FILESTORE' || echo 'NO_FILESTORE'"
+            stdin, stdout, stderr = ssh.exec_command(check_filestore_cmd)
+            has_filestore = stdout.read().decode().strip() == 'HAS_FILESTORE'
+            
+            if has_filestore:
+                # Archive has 'filestore' parent directory - need to find the source database name
+                list_dbs_cmd = f"ls {remote_temp_dir}/filestore/"
+                stdin, stdout, stderr = ssh.exec_command(list_dbs_cmd)
+                source_db_name = stdout.read().decode().strip().split('\n')[0]  # Get first database
+                
+                if source_db_name:
+                    remote_source = os.path.join(remote_temp_dir, "filestore", source_db_name)
+                    self.log(f"Found filestore for database: {source_db_name}")
+                else:
+                    # No database subdirectory, files might be directly in filestore/
+                    remote_source = os.path.join(remote_temp_dir, "filestore")
+            else:
+                # Check if there's a single directory (database name)
+                list_dirs_cmd = f"find {remote_temp_dir} -maxdepth 1 -type d ! -path {remote_temp_dir} | head -1"
+                stdin, stdout, stderr = ssh.exec_command(list_dirs_cmd)
+                single_dir = stdout.read().decode().strip()
+                
+                if single_dir and single_dir != remote_temp_dir:
+                    remote_source = single_dir
+                    self.log(f"Found single directory: {os.path.basename(single_dir)}")
+                else:
+                    # Files are directly in temp dir (hash directories)
+                    remote_source = remote_temp_dir
+                    self.log("Detected direct filestore structure")
+            
+            # Remove existing remote filestore if it exists
+            self.log(f"Preparing target directory: {remote_target}")
+            
+            # Create parent directories if needed
+            remote_parent = os.path.dirname(remote_target)
+            self.log(f"Creating parent directory: {remote_parent}")
+            stdin, stdout, stderr = ssh.exec_command(f"mkdir -p {remote_parent}")
+            stdout.read()
+            mkdir_error = stderr.read().decode()
+            if mkdir_error and ("permission denied" in mkdir_error.lower() or "cannot create" in mkdir_error.lower()):
+                raise Exception(f"Permission denied: Cannot create directory {remote_parent}. "
+                               f"Please ensure the SSH user has write permissions to this location, "
+                               f"or update the filestore path in the connection settings.")
+            
+            # Remove existing filestore
+            stdin, stdout, stderr = ssh.exec_command(f"rm -rf {remote_target}")
+            stdout.read()
+            
+            # Move the extracted filestore to the target location
+            self.log(f"Moving filestore to target location...")
+            move_cmd = f"mv {remote_source} {remote_target}"
+            stdin, stdout, stderr = ssh.exec_command(move_cmd)
+            stdout.read()
+            error = stderr.read().decode()
+            if error and "cannot" in error.lower():
+                raise Exception(f"Failed to move filestore: {error}")
+            
+            # Clean up remote temp directory
+            self.log("Cleaning up remote temporary files...")
+            cleanup_cmd = f"rm -rf {remote_temp_dir}"
+            stdin, stdout, stderr = ssh.exec_command(cleanup_cmd)
+            stdout.read()
+            
+            self.log("Remote filestore restored successfully")
+            self.update_progress(90, "Remote filestore restore complete")
+            return True
+
+        except Exception as e:
+            self.log(f"Error restoring remote filestore: {str(e)}", "error")
+            # Try to clean up on error
+            try:
+                if 'remote_temp_dir' in locals() and 'ssh' in locals():
+                    stdin, stdout, stderr = ssh.exec_command(f"rm -rf {remote_temp_dir}")
+                    stdout.read()
+            except:
+                pass
             return False
 
     def backup(self, config):
@@ -991,22 +1146,27 @@ class OdooBackupRestore:
             # Extract backup
             db_dump, filestore_archive, metadata = self.extract_backup(backup_file)
 
-            if not db_dump:
-                raise Exception("No database dump found in backup file")
+            # Check what we should restore based on flags
+            should_restore_db = not config.get("filestore_only", False)
+            should_restore_filestore = not config.get("db_only", False)
 
-            # Restore database
-            self.restore_database(config, db_dump)
+            # Restore database if not filestore_only
+            if should_restore_db:
+                if not db_dump:
+                    raise Exception("No database dump found in backup file")
+                self.restore_database(config, db_dump)
 
-            # Restore filestore
-            if filestore_archive and config.get("restore_filestore", True):
+            # Restore filestore if not db_only
+            if should_restore_filestore and filestore_archive:
                 self.restore_filestore(config, filestore_archive)
 
-            # Neutralize database if requested
-            if config.get("neutralize", False):
+            # Neutralize database if requested (only if database was restored)
+            if should_restore_db and config.get("neutralize", False):
                 self.neutralize_database(config)
 
-            # Clean up and regenerate assets for proper icon display
-            self.post_restore_cleanup(config)
+            # Clean up and regenerate assets for proper icon display (only if database was restored)
+            if should_restore_db:
+                self.post_restore_cleanup(config)
 
             self.update_progress(100, "Restore completed!")
             self.log("=== Restore Complete ===", "success")

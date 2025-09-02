@@ -2666,6 +2666,8 @@ https://github.com/jpsteil/odoo-backup-manager
             "db_only": self.db_only.get(),
             "filestore_only": self.filestore_only.get(),
             "neutralize": self.neutralize.get(),
+            "use_ssh": dest_conn.get("use_ssh", False),
+            "ssh_connection_id": dest_conn.get("ssh_connection_id"),
         }
         
         # Create custom confirmation dialog
@@ -2710,10 +2712,14 @@ https://github.com/jpsteil/odoo-backup-manager
         
         ttk.Label(msg_frame, text="⚠️ WARNING - This will PERMANENTLY DELETE:", 
                  font=("TkDefaultFont", 10, "bold"), foreground="#CC0000").pack(anchor="w", pady=(0, 5))
-        ttk.Label(msg_frame, text=f"• Database: {dest_config['db_name']}", 
-                 foreground="#CC0000").pack(anchor="w", padx=(20, 0), pady=2)
         
-        if not dest_config.get('filestore_only', False) and dest_config.get('filestore_path'):
+        # Only show database deletion warning if not filestore_only
+        if not dest_config.get('filestore_only', False):
+            ttk.Label(msg_frame, text=f"• Database: {dest_config['db_name']}", 
+                     foreground="#CC0000").pack(anchor="w", padx=(20, 0), pady=2)
+        
+        # Only show filestore deletion warning if not db_only
+        if not dest_config.get('db_only', False) and dest_config.get('filestore_path'):
             ttk.Label(msg_frame, text=f"• Filestore at: {dest_config['filestore_path']}/filestore/{dest_config['db_name']}", 
                      foreground="#CC0000").pack(anchor="w", padx=(20, 0), pady=2)
         
@@ -2868,6 +2874,8 @@ https://github.com/jpsteil/odoo-backup-manager
             "filestore_path": dest_conn["filestore_path"],
             "db_only": self.db_only.get(),
             "filestore_only": self.filestore_only.get(),
+            "use_ssh": dest_conn.get("use_ssh", False),
+            "ssh_connection_id": dest_conn.get("ssh_connection_id"),
         }
 
         # Confirm operation

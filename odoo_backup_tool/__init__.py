@@ -2,7 +2,7 @@
 Odoo Backup Tool - A comprehensive backup and restore utility for Odoo instances
 """
 
-__version__ = "1.5.15"
+__version__ = "1.5.16"
 __author__ = "Odoo Backup Tool Team"
 
 from .core.backup_restore import OdooBackupRestore

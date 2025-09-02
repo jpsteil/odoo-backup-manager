@@ -2,6 +2,19 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.5.16] - 2025-01-02
+
+### Added
+- SSH support for remote filestore restoration - can now restore filestores to remote servers via SSH/SFTP
+- Better error messages for SSH permission issues during restore
+
+### Fixed
+- Fixed "Filestore Only" mode incorrectly attempting database operations
+- Fixed backup & restore operation not passing SSH configuration to destination
+- Fixed restore confirmation dialog to correctly show what will be deleted based on selected options (db_only/filestore_only)
+- Fixed AttributeError 'OdooBackupRestore' object has no attribute 'ssh_manager'
+- Fixed SSH connection handling in restore operations to match backup implementation
+
 ## [1.5.15] - 2025-01-26
 
 ### Fixed
