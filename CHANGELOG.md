@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.5.19] - 2025-01-02
+
+### Fixed
+- Corrected PyPI package build to properly include console script entry points
+- Ensures pipx installation works correctly with both CLI commands
+
 ## [1.5.18] - 2025-01-02
 
 ### Added
