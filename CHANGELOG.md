@@ -2,6 +2,23 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.5.17] - 2025-01-02
+
+### Fixed
+- Fixed SSH restore to properly detect and copy all filestore directories (was only copying first directory)
+- Fixed local restore to properly copy filestore contents without shutil.move errors
+- Improved directory detection logic for archives with multiple hash directories (59/, 5a/, 5b/, etc.)
+- Added better logging for SSH restore operations to aid debugging
+
+### Changed
+- Restored automatic filestore path appending (adds /filestore/DATABASE_NAME if not present)
+- SSH restore now uses rsync or tar for more reliable copying of all files and directories
+- Local restore now copies contents item by item to avoid move conflicts
+
+### Improved
+- More robust handling of different archive structures in both local and SSH restore
+- Better error messages and logging during restore operations
+
 ## [1.5.16] - 2025-01-02
 
 ### Added

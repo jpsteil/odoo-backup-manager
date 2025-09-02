@@ -352,11 +352,16 @@ class OdooBackupRestore:
             self.log("Error: SSH connection not found", "error")
             return None
 
-        # Build full filestore path with database name
+        # Build full filestore path with database name if needed
         db_name = config.get("db_name", "")
         if db_name and not filestore_path.endswith(db_name):
-            # Append filestore/db_name if not already there
-            full_filestore_path = os.path.join(filestore_path, "filestore", db_name)
+            # Check if path already ends with 'filestore'
+            if filestore_path.rstrip('/').endswith('filestore'):
+                # Path already has filestore, just add database name
+                full_filestore_path = os.path.join(filestore_path, db_name)
+            else:
+                # Path doesn't have filestore, add filestore/db_name
+                full_filestore_path = os.path.join(filestore_path, "filestore", db_name)
         else:
             full_filestore_path = filestore_path
             
@@ -677,12 +682,25 @@ class OdooBackupRestore:
     
     def _restore_local_filestore(self, config, filestore_path, filestore_archive):
         """Restore filestore locally"""
-        self.log(f"Restoring filestore locally to: {filestore_path}...")
+        # Build full filestore path with database name if needed
+        db_name = config.get("db_name", "")
+        if db_name and not filestore_path.endswith(db_name):
+            # Check if path already ends with 'filestore'
+            if filestore_path.rstrip('/').endswith('filestore'):
+                # Path already has filestore, just add database name
+                target_base_path = os.path.join(filestore_path, db_name)
+            else:
+                # Path doesn't have filestore, add filestore/db_name
+                target_base_path = os.path.join(filestore_path, "filestore", db_name)
+        else:
+            target_base_path = filestore_path
+            
+        self.log(f"Restoring filestore locally to: {target_base_path}...")
         self.update_progress(75, "Restoring filestore...")
 
         try:
             # Create parent directory if it doesn't exist
-            os.makedirs(filestore_path, exist_ok=True)
+            os.makedirs(os.path.dirname(target_base_path), exist_ok=True)
 
             # Extract filestore archive to temp location first
             with tempfile.TemporaryDirectory() as temp_dir:
@@ -703,7 +721,7 @@ class OdooBackupRestore:
                 if has_hash_dirs:
                     # Archive contains filestore files directly
                     self.log("Detected direct filestore structure (hash directories)")
-                    target_path = os.path.join(filestore_path, "filestore", config["db_name"])
+                    target_path = target_base_path
                     
                     # Remove the existing filestore if it exists
                     if os.path.exists(target_path):
@@ -733,40 +751,52 @@ class OdooBackupRestore:
                     if extracted_dirs:
                         source_db_name = extracted_dirs[0]  # Should only be one
                         source_path = os.path.join(temp_filestore, source_db_name)
-                        target_path = os.path.join(filestore_path, "filestore", config["db_name"])
+                        target_path = target_base_path
                         
                         # Now remove the existing filestore if it exists
                         if os.path.exists(target_path):
                             self.log(f"Removing existing filestore: {target_path}")
                             shutil.rmtree(target_path, ignore_errors=True)
                         
-                        # Create the filestore directory structure if needed
-                        os.makedirs(os.path.dirname(target_path), exist_ok=True)
+                        # Create the target directory
+                        os.makedirs(target_path, exist_ok=True)
                         
-                        # Move the extracted filestore to the correct location with correct name
-                        self.log(f"Moving filestore from '{source_db_name}' to '{config['db_name']}'")
-                        shutil.move(source_path, target_path)
-                        self.log(f"Filestore moved successfully")
+                        # Copy all contents from source to target
+                        self.log(f"Copying filestore contents from '{source_db_name}'")
+                        for item in os.listdir(source_path):
+                            source_item = os.path.join(source_path, item)
+                            dest_item = os.path.join(target_path, item)
+                            if os.path.isdir(source_item):
+                                shutil.copytree(source_item, dest_item)
+                            else:
+                                shutil.copy2(source_item, dest_item)
+                        self.log(f"Filestore contents copied successfully")
                     else:
                         raise Exception("No database directory found in extracted filestore")
                 
                 elif len(extracted_items) == 1 and os.path.isdir(os.path.join(temp_dir, extracted_items[0])):
                     # Archive contains a single directory (possibly the database name)
                     source_path = os.path.join(temp_dir, extracted_items[0])
-                    target_path = os.path.join(filestore_path, "filestore", config["db_name"])
+                    target_path = target_base_path
                     
                     # Remove existing filestore if it exists
                     if os.path.exists(target_path):
                         self.log(f"Removing existing filestore: {target_path}")
                         shutil.rmtree(target_path, ignore_errors=True)
                     
-                    # Create the filestore directory structure if needed
-                    os.makedirs(os.path.dirname(target_path), exist_ok=True)
+                    # Create the target directory
+                    os.makedirs(target_path, exist_ok=True)
                     
-                    # Move the extracted filestore to the correct location
-                    self.log(f"Moving filestore to '{config['db_name']}'")
-                    shutil.move(source_path, target_path)
-                    self.log(f"Filestore moved successfully")
+                    # Copy all contents from source to target
+                    self.log(f"Copying filestore contents from single directory")
+                    for item in os.listdir(source_path):
+                        source_item = os.path.join(source_path, item)
+                        dest_item = os.path.join(target_path, item)
+                        if os.path.isdir(source_item):
+                            shutil.copytree(source_item, dest_item)
+                        else:
+                            shutil.copy2(source_item, dest_item)
+                    self.log(f"Filestore contents copied successfully")
                 
                 else:
                     raise Exception("Unable to determine filestore structure in archive")
@@ -797,18 +827,16 @@ class OdooBackupRestore:
         try:
             # Get SSH client connection
             ssh = self._get_ssh_client(ssh_conn)
-            # Build the full remote path with database name
-            db_name = config.get("db_name", "")
-            if not db_name:
-                raise Exception("Database name is required for remote filestore restore")
             
-            # Ensure filestore_path ends with /filestore/DATABASE_NAME
-            if not filestore_path.endswith(db_name):
-                if filestore_path.endswith("filestore"):
+            # Build full filestore path with database name if needed
+            db_name = config.get("db_name", "")
+            if db_name and not filestore_path.endswith(db_name):
+                # Check if path already ends with 'filestore'
+                if filestore_path.rstrip('/').endswith('filestore'):
+                    # Path already has filestore, just add database name
                     remote_target = os.path.join(filestore_path, db_name)
-                elif filestore_path.endswith("/"):
-                    remote_target = os.path.join(filestore_path, "filestore", db_name)
                 else:
+                    # Path doesn't have filestore, add filestore/db_name
                     remote_target = os.path.join(filestore_path, "filestore", db_name)
             else:
                 remote_target = filestore_path
@@ -845,6 +873,7 @@ class OdooBackupRestore:
             list_cmd = f"ls -la {remote_temp_dir}"
             stdin, stdout, stderr = ssh.exec_command(list_cmd)
             ls_output = stdout.read().decode()
+            self.log(f"Extracted archive contents: {ls_output[:200]}...")  # Log first 200 chars for debugging
             
             # Check if we have filestore directory or direct hash directories
             check_filestore_cmd = f"test -d {remote_temp_dir}/filestore && echo 'HAS_FILESTORE' || echo 'NO_FILESTORE'"
@@ -864,18 +893,23 @@ class OdooBackupRestore:
                     # No database subdirectory, files might be directly in filestore/
                     remote_source = os.path.join(remote_temp_dir, "filestore")
             else:
-                # Check if there's a single directory (database name)
-                list_dirs_cmd = f"find {remote_temp_dir} -maxdepth 1 -type d ! -path {remote_temp_dir} | head -1"
-                stdin, stdout, stderr = ssh.exec_command(list_dirs_cmd)
-                single_dir = stdout.read().decode().strip()
+                # Check if we have hash directories (like 59/, 5a/, etc.) which indicates direct filestore
+                # Or a single database directory
+                count_dirs_cmd = f"find {remote_temp_dir} -maxdepth 1 -type d ! -path {remote_temp_dir} | wc -l"
+                stdin, stdout, stderr = ssh.exec_command(count_dirs_cmd)
+                dir_count = int(stdout.read().decode().strip())
                 
-                if single_dir and single_dir != remote_temp_dir:
+                if dir_count == 1:
+                    # Exactly one directory - might be database name
+                    get_dir_cmd = f"find {remote_temp_dir} -maxdepth 1 -type d ! -path {remote_temp_dir}"
+                    stdin, stdout, stderr = ssh.exec_command(get_dir_cmd)
+                    single_dir = stdout.read().decode().strip()
                     remote_source = single_dir
                     self.log(f"Found single directory: {os.path.basename(single_dir)}")
                 else:
-                    # Files are directly in temp dir (hash directories)
+                    # Multiple directories (hash dirs) or no directories - use temp dir as source
                     remote_source = remote_temp_dir
-                    self.log("Detected direct filestore structure")
+                    self.log(f"Detected direct filestore structure with {dir_count} directories")
             
             # Remove existing remote filestore if it exists
             self.log(f"Preparing target directory: {remote_target}")
@@ -895,14 +929,34 @@ class OdooBackupRestore:
             stdin, stdout, stderr = ssh.exec_command(f"rm -rf {remote_target}")
             stdout.read()
             
-            # Move the extracted filestore to the target location
+            # Create the target directory
+            stdin, stdout, stderr = ssh.exec_command(f"mkdir -p {remote_target}")
+            stdout.read()
+            
+            # Move the extracted filestore contents to the target location
             self.log(f"Moving filestore to target location...")
-            move_cmd = f"mv {remote_source} {remote_target}"
+            self.log(f"Source: {remote_source}")
+            self.log(f"Target: {remote_target}")
+            
+            # Copy all contents from source to target using rsync or a more reliable method
+            # First try rsync which handles all cases properly
+            check_rsync = "which rsync"
+            stdin, stdout, stderr = ssh.exec_command(check_rsync)
+            has_rsync = stdout.channel.recv_exit_status() == 0
+            
+            if has_rsync:
+                move_cmd = f"rsync -a {remote_source}/ {remote_target}/"
+                self.log("Using rsync to copy filestore...")
+            else:
+                # Use tar to preserve everything including permissions and empty directories
+                move_cmd = f"cd {remote_source} && tar cf - . | (cd {remote_target} && tar xf -)"
+                self.log("Using tar to copy filestore...")
+            
             stdin, stdout, stderr = ssh.exec_command(move_cmd)
             stdout.read()
             error = stderr.read().decode()
-            if error and "cannot" in error.lower():
-                raise Exception(f"Failed to move filestore: {error}")
+            if error and "error" in error.lower():
+                self.log(f"Warning during copy: {error}", "warning")
             
             # Clean up remote temp directory
             self.log("Cleaning up remote temporary files...")
