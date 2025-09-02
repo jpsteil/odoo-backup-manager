@@ -2,6 +2,16 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.5.18] - 2025-01-02
+
+### Added
+- Console script entry points in pyproject.toml for pipx compatibility
+- Proper package configuration for PyPI publication
+
+### Changed
+- Moved entry points from setup.py dynamic configuration to explicit pyproject.toml definition
+- Package can now be installed via pipx with working CLI commands
+
 ## [1.5.17] - 2025-01-02
 
 ### Fixed
