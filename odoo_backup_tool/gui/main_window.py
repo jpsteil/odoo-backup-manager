@@ -2419,9 +2419,8 @@ https://github.com/jpsteil/odoo-backup-manager
         # Look for all backup files in the backup directory
         if os.path.exists(self.backup_directory):
             for filename in os.listdir(self.backup_directory):
-                # Check for .tar.gz and .zip backup files
-                if (filename.startswith("backup_") and filename.endswith('.tar.gz')) or \
-                   (filename.endswith('.zip') and "backup" in filename.lower()):
+                # Check for all .tar.gz, .tgz and .zip files
+                if filename.endswith('.tar.gz') or filename.endswith('.tgz') or filename.endswith('.zip'):
                     full_path = os.path.join(self.backup_directory, filename)
                     if os.path.isfile(full_path):
                         backup_files.append(full_path)
