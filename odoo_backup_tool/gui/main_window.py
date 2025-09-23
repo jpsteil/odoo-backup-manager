@@ -2873,6 +2873,7 @@ https://github.com/jpsteil/odoo-backup-manager
             "filestore_path": dest_conn["filestore_path"],
             "db_only": self.db_only.get(),
             "filestore_only": self.filestore_only.get(),
+            "neutralize": self.neutralize.get(),
             "use_ssh": dest_conn.get("use_ssh", False),
             "ssh_connection_id": dest_conn.get("ssh_connection_id"),
         }

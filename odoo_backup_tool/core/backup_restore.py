@@ -121,6 +121,42 @@ class OdooBackupRestore:
             self.log(error_msg, "error")
             raise Exception(error_msg)
 
+    def _normalize_filestore_path(self, base_path, db_name):
+        """Normalize and construct proper filestore path.
+        
+        Returns the full path to the database filestore, handling various input formats:
+        - If base_path already contains /filestore/db_name, return as-is
+        - If base_path ends with /filestore, append db_name
+        - Otherwise append /filestore/db_name
+        """
+        if not base_path or not db_name:
+            return base_path
+            
+        # Normalize path separators and remove trailing slashes
+        normalized_path = os.path.normpath(base_path)
+        path_parts = normalized_path.replace('\\', '/').split('/')
+        
+        # Check if the path already contains the complete filestore/db_name structure
+        for i in range(len(path_parts) - 1):
+            if path_parts[i] == 'filestore' and path_parts[i + 1] == db_name:
+                # Path already contains filestore/db_name, return as-is
+                return normalized_path
+        
+        # Check if path ends with just 'filestore'
+        if path_parts[-1] == 'filestore':
+            # Just append database name
+            return os.path.join(normalized_path, db_name)
+        
+        # Check if path ends with the database name (might already be complete)
+        if path_parts[-1] == db_name:
+            # Check if filestore is the second-to-last element
+            if len(path_parts) > 1 and path_parts[-2] == 'filestore':
+                # Path already complete (ends with filestore/db_name)
+                return normalized_path
+        
+        # Default case: append filestore/db_name
+        return os.path.join(normalized_path, 'filestore', db_name)
+
     def test_connection(self, config):
         """Test database connection and filestore path"""
         messages = []
@@ -210,23 +246,25 @@ class OdooBackupRestore:
                     messages.append(f"⚠ Could not test remote filestore: {str(e)}")
             else:
                 # Test local filestore path
-                if os.path.exists(filestore_path):
-                    messages.append(f"✓ Local filestore path exists: {filestore_path}")
-                else:
-                    # Try with database name appended
-                    db_name = config.get("db_name", "")
-                    if db_name:
-                        full_path = os.path.join(filestore_path, "filestore", db_name)
-                        if os.path.exists(full_path):
-                            messages.append(
-                                f"✓ Local filestore path exists: {full_path}"
-                            )
-                        else:
-                            messages.append(f"⚠ Local filestore path not found")
+                db_name = config.get("db_name", "")
+                if db_name:
+                    # Use the normalize function to get the expected full path
+                    full_path = self._normalize_filestore_path(filestore_path, db_name)
+                    if os.path.exists(full_path):
+                        messages.append(f"✓ Local filestore path exists: {full_path}")
                     else:
-                        messages.append(
-                            f"⚠ Local filestore path not found: {filestore_path}"
-                        )
+                        # Also check if the base path exists without appending
+                        if os.path.exists(filestore_path):
+                            messages.append(f"✓ Local filestore base path exists: {filestore_path}")
+                            messages.append(f"  Note: Expected full path would be: {full_path}")
+                        else:
+                            messages.append(f"⚠ Local filestore path not found: {full_path}")
+                else:
+                    # No database name provided, just check the base path
+                    if os.path.exists(filestore_path):
+                        messages.append(f"✓ Local filestore path exists: {filestore_path}")
+                    else:
+                        messages.append(f"⚠ Local filestore path not found: {filestore_path}")
 
         # Return combined result
         return not has_errors, "\n".join(messages)
@@ -448,20 +486,27 @@ class OdooBackupRestore:
 
     def _backup_local_filestore(self, config, filestore_path):
         """Backup local filestore"""
-        if not os.path.exists(filestore_path):
+        # Build the complete filestore path with database name
+        db_name = config.get("db_name", "")
+        if db_name:
+            full_filestore_path = self._normalize_filestore_path(filestore_path, db_name)
+        else:
+            full_filestore_path = filestore_path
+            
+        if not os.path.exists(full_filestore_path):
             self.log(
-                f"Warning: Local filestore path does not exist: {filestore_path}",
+                f"Warning: Local filestore path does not exist: {full_filestore_path}",
                 "warning",
             )
             return None
 
-        self.log(f"Backing up local filestore: {filestore_path}...")
+        self.log(f"Backing up local filestore: {full_filestore_path}...")
         self.update_progress(50, "Backing up filestore...")
 
         # Create tar archive of filestore
         archive_name = os.path.join(self.temp_dir, "filestore.tar.gz")
         with tarfile.open(archive_name, "w:gz") as tar:
-            tar.add(filestore_path, arcname="filestore")
+            tar.add(full_filestore_path, arcname="filestore")
 
         self.log(f"Filestore backed up successfully")
         self.update_progress(70, "Filestore backup complete")
@@ -682,16 +727,10 @@ class OdooBackupRestore:
     
     def _restore_local_filestore(self, config, filestore_path, filestore_archive):
         """Restore filestore locally"""
-        # Build full filestore path with database name if needed
+        # Build full filestore path with database name using the same logic as backup
         db_name = config.get("db_name", "")
-        if db_name and not filestore_path.endswith(db_name):
-            # Check if path already ends with 'filestore'
-            if filestore_path.rstrip('/').endswith('filestore'):
-                # Path already has filestore, just add database name
-                target_base_path = os.path.join(filestore_path, db_name)
-            else:
-                # Path doesn't have filestore, add filestore/db_name
-                target_base_path = os.path.join(filestore_path, "filestore", db_name)
+        if db_name:
+            target_base_path = self._normalize_filestore_path(filestore_path, db_name)
         else:
             target_base_path = filestore_path
             
@@ -1027,16 +1066,26 @@ class OdooBackupRestore:
             # Build the neutralization SQL queries
             # Using DO blocks to handle tables that might not exist (from optional modules)
             neutralize_sql = """
-            -- Disable all outgoing mail servers
-            UPDATE ir_mail_server SET active = false WHERE active = true;
-            
-            -- Remove email server configurations (keep records but clear credentials)
-            UPDATE ir_mail_server 
-            SET smtp_user = NULL, 
+            -- Disable all outgoing mail servers and clear credentials in one operation
+            UPDATE ir_mail_server
+            SET active = false,
+                smtp_user = NULL,
                 smtp_pass = NULL,
                 smtp_host = 'disabled.example.com',
-                smtp_port = 25
-            WHERE active = false;
+                smtp_port = 25;
+
+            -- Disable the "Use Custom Email Servers" system parameter
+            UPDATE ir_config_parameter
+            SET value = 'False'
+            WHERE key = 'mail.use_email_servers';
+
+            -- Insert the parameter if it doesn't exist
+            INSERT INTO ir_config_parameter (key, value)
+            SELECT 'mail.use_email_servers', 'False'
+            WHERE NOT EXISTS (
+                SELECT 1 FROM ir_config_parameter
+                WHERE key = 'mail.use_email_servers'
+            );
             
             -- Disable all scheduled actions (crons)
             UPDATE ir_cron SET active = false WHERE active = true;
@@ -1075,10 +1124,22 @@ class OdooBackupRestore:
             END $$;
             
             -- Add warning message to company name
-            UPDATE res_company 
+            UPDATE res_company
             SET name = CONCAT('[TEST] ', name)
             WHERE name NOT LIKE '[TEST]%';
-            
+
+            -- Remove or invalidate Enterprise license code
+            -- We prefix it with NEUTRALIZED- to make it clear this was intentionally modified
+            -- This prevents accidental production license usage while preserving evidence of neutralization
+            UPDATE ir_config_parameter
+            SET value = CONCAT('NEUTRALIZED-', value)
+            WHERE key = 'database.enterprise_code'
+            AND value NOT LIKE 'NEUTRALIZED-%';
+
+            -- Also clear the license expiration date to avoid confusion
+            DELETE FROM ir_config_parameter
+            WHERE key IN ('database.expiration_date', 'database.expiration_reason');
+
             -- Log neutralization details
             INSERT INTO ir_logging (create_date, create_uid, name, type, dbname, level, message, path, line, func)
             VALUES (
@@ -1104,12 +1165,45 @@ class OdooBackupRestore:
                 "-d", config["db_name"],
                 "-c", neutralize_sql
             ]
-            
+
             result = subprocess.run(psql_cmd, env=env, capture_output=True, text=True)
-            
+
             if result.returncode != 0:
-                self.log(f"Warning: Some neutralization queries may have failed: {result.stderr}", "warning")
-            
+                self.log(f"Error: Neutralization queries failed: {result.stderr}", "error")
+                self.log(f"Output: {result.stdout}", "error")
+                raise Exception(f"Failed to neutralize database: {result.stderr}")
+
+            # Verify that mail servers were actually disabled
+            verify_sql = """
+            SELECT COUNT(*) FROM ir_mail_server WHERE active = true;
+            """
+
+            verify_cmd = [
+                "psql",
+                "-h", config["db_host"],
+                "-p", str(config["db_port"]),
+                "-U", config["db_user"],
+                "-d", config["db_name"],
+                "-t",  # Tuples only (no headers)
+                "-c", verify_sql
+            ]
+
+            verify_result = subprocess.run(verify_cmd, env=env, capture_output=True, text=True)
+            if verify_result.returncode == 0:
+                active_count = int(verify_result.stdout.strip() or "0")
+                if active_count > 0:
+                    self.log(f"Warning: {active_count} mail server(s) still active after neutralization!", "warning")
+                    # Try a more aggressive approach
+                    force_disable_sql = """
+                    -- Force disable all mail servers with explicit true/false values
+                    UPDATE ir_mail_server SET active = 'f' WHERE active IN ('t', 'true', '1', true);
+                    -- Also try updating as boolean
+                    UPDATE ir_mail_server SET active = false;
+                    """
+                    force_cmd = psql_cmd[:-2] + ["-c", force_disable_sql]
+                    subprocess.run(force_cmd, env=env, capture_output=True, text=True)
+                    self.log("Applied forced mail server deactivation", "warning")
+
             self.log("Database neutralization complete:", "success")
             self.log("  ✓ All outgoing mail servers disabled", "info")
             self.log("  ✓ All scheduled actions (crons) disabled", "info")
@@ -1117,6 +1211,7 @@ class OdooBackupRestore:
             self.log("  ✓ Email queue cleared", "info")
             self.log("  ✓ Website indexing disabled", "info")
             self.log("  ✓ Company names prefixed with [TEST]", "info")
+            self.log("  ✓ Enterprise license neutralized", "info")
             
             self.update_progress(90, "Neutralization complete")
             return True
