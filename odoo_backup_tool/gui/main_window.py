@@ -298,7 +298,7 @@ class OdooBackupRestoreGUI:
         
         # Neutralize option with tooltip
         neutralize_check = ttk.Checkbutton(
-            options_frame, text="Neutralize (Restore Only)", variable=self.neutralize
+            options_frame, text="Neutralize on Restore", variable=self.neutralize
         )
         neutralize_check.pack(side="left", padx=10)
         
