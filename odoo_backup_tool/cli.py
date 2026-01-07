@@ -86,9 +86,17 @@ Default behavior:
   odoo-backup --gui        # Force GUI mode (error if not available)
 
 Examples:
-  # Save a connection profile (do this first)
+  # Save an SSH connection (for remote servers)
+  odoo-backup --cli connections save --type ssh --name prod-ssh --host remote.example.com --user ubuntu --ssh-key-path ~/.ssh/id_rsa
+
+  # Save an Odoo connection (local)
   odoo-backup --cli connections save --name prod --host db.example.com --user odoo --database mydb --filestore /var/lib/odoo
-  odoo-backup --cli connections save --name dev --host localhost --user odoo --database devdb --allow-restore
+
+  # Save an Odoo connection (linked to SSH)
+  odoo-backup --cli connections save --name prod --host localhost --user odoo --database mydb --ssh-connection prod-ssh --allow-restore
+
+  # List saved connections
+  odoo-backup --cli connections list
 
   # Backup using connection profile
   odoo-backup --cli backup --connection prod
@@ -96,14 +104,8 @@ Examples:
   # Restore using connection profile
   odoo-backup --cli restore --connection dev --file backup.tar.gz --name test_db
 
-  # List saved connections
-  odoo-backup --cli connections list
-
   # Manual backup (without saved connection)
   odoo-backup --cli backup --name mydb --host localhost --user odoo --filestore /var/lib/odoo/filestore
-
-  # Manual restore (without saved connection)
-  odoo-backup --cli restore --file backup.tar.gz --name newdb --host localhost --user odoo
         """,
     )
     
@@ -167,17 +169,23 @@ Examples:
     # Save connection
     conn_save = conn_subparsers.add_parser("save", help="Save a new connection")
     conn_save.add_argument("--name", required=True, help="Connection name")
-    conn_save.add_argument("--host", required=True, help="Database host")
-    conn_save.add_argument("--port", type=int, default=5432, help="Database port")
-    conn_save.add_argument("--database", help="Database name")
-    conn_save.add_argument("--user", default="odoo", help="Database user")
-    conn_save.add_argument("--password", help="Database password")
-    conn_save.add_argument("--filestore", help="Filestore path")
-    conn_save.add_argument("--odoo-version", default="17.0", help="Odoo version")
+    conn_save.add_argument("--type", choices=["odoo", "ssh"], default="odoo",
+                          help="Connection type (odoo or ssh)")
+    conn_save.add_argument("--host", required=True, help="Host address")
+    conn_save.add_argument("--port", type=int, help="Port (default: 5432 for odoo, 22 for ssh)")
+    conn_save.add_argument("--user", help="Username (default: 'odoo' for odoo connections)")
+    conn_save.add_argument("--password", help="Password (will prompt if not provided)")
+    # Odoo-specific arguments
+    conn_save.add_argument("--database", help="Database name (odoo connections only)")
+    conn_save.add_argument("--filestore", help="Filestore path (odoo connections only)")
+    conn_save.add_argument("--odoo-version", default="17.0", help="Odoo version (odoo connections only)")
     conn_save.add_argument(
         "--allow-restore", action="store_true",
-        help="Allow restore operations to this connection (use for dev/test only, not production)"
+        help="Allow restore operations (odoo connections only, use for dev/test only, not production)"
     )
+    # SSH-specific arguments
+    conn_save.add_argument("--ssh-key-path", help="Path to SSH private key file (ssh connections only)")
+    conn_save.add_argument("--ssh-connection", help="Link to existing SSH connection (odoo connections only)")
 
     # Delete connection
     conn_delete = conn_subparsers.add_parser("delete", help="Delete a connection")
@@ -448,30 +456,75 @@ def handle_connections(args):
                 print()
 
     elif args.conn_action == "save":
-        password = args.password
-        if password is None:
-            password = getpass.getpass("Database password (optional): ")
+        conn_type = args.type
 
-        config = {
-            "host": args.host,
-            "port": args.port,
-            "database": args.database,
-            "username": args.user,
-            "password": password if password else None,
-            "filestore_path": args.filestore,
-            "odoo_version": args.odoo_version,
-            "allow_restore": args.allow_restore,
-        }
+        if conn_type == "ssh":
+            # Save SSH connection
+            password = args.password
+            if password is None and not args.ssh_key_path:
+                password = getpass.getpass("SSH password (optional if using key): ")
 
-        if conn_manager.save_odoo_connection(args.name, config):
-            print(f"✅ Connection '{args.name}' saved successfully")
-            if args.allow_restore:
-                print("⚠️  Warning: Restore operations are enabled for this connection")
-                print("   This should only be used for development/test databases")
+            # Default port for SSH
+            port = args.port if args.port else 22
+            user = args.user if args.user else ""
+
+            if not user:
+                print("Error: --user is required for SSH connections")
+                sys.exit(1)
+
+            config = {
+                "host": args.host,
+                "port": port,
+                "username": user,
+                "password": password if password else None,
+                "ssh_key_path": args.ssh_key_path if args.ssh_key_path else "",
+            }
+
+            if conn_manager.save_ssh_connection(args.name, config):
+                print(f"✅ SSH connection '{args.name}' saved successfully")
+                if args.ssh_key_path:
+                    print(f"   Using SSH key: {args.ssh_key_path}")
+                else:
+                    print("   Using password authentication")
             else:
-                print("🔒 Restore operations are disabled (production safe)")
+                print(f"❌ Failed to save SSH connection '{args.name}'")
+
         else:
-            print(f"❌ Failed to save connection '{args.name}'")
+            # Save Odoo connection
+            password = args.password
+            if password is None:
+                password = getpass.getpass("Database password (optional): ")
+
+            # Default port and user for Odoo
+            port = args.port if args.port else 5432
+            user = args.user if args.user else "odoo"
+
+            config = {
+                "host": args.host,
+                "port": port,
+                "database": args.database,
+                "username": user,
+                "password": password if password else None,
+                "filestore_path": args.filestore,
+                "odoo_version": args.odoo_version,
+                "allow_restore": args.allow_restore,
+            }
+
+            # Link to SSH connection if specified
+            if args.ssh_connection:
+                config["ssh_connection_name"] = args.ssh_connection
+
+            if conn_manager.save_odoo_connection(args.name, config):
+                print(f"✅ Connection '{args.name}' saved successfully")
+                if args.ssh_connection:
+                    print(f"   Linked to SSH connection: {args.ssh_connection}")
+                if args.allow_restore:
+                    print("⚠️  Warning: Restore operations are enabled for this connection")
+                    print("   This should only be used for development/test databases")
+                else:
+                    print("🔒 Restore operations are disabled (production safe)")
+            else:
+                print(f"❌ Failed to save connection '{args.name}'")
 
     elif args.conn_action == "delete":
         connections = conn_manager.list_connections()

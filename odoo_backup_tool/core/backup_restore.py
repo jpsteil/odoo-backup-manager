@@ -733,16 +733,21 @@ class OdooBackupRestore:
             target_base_path = self._normalize_filestore_path(filestore_path, db_name)
         else:
             target_base_path = filestore_path
-            
+
         self.log(f"Restoring filestore locally to: {target_base_path}...")
         self.update_progress(75, "Restoring filestore...")
 
         try:
             # Create parent directory if it doesn't exist
-            os.makedirs(os.path.dirname(target_base_path), exist_ok=True)
+            parent_dir = os.path.dirname(target_base_path)
+            os.makedirs(parent_dir, exist_ok=True)
 
-            # Extract filestore archive to temp location first
-            with tempfile.TemporaryDirectory() as temp_dir:
+            # Extract filestore archive to temp location ON THE TARGET DRIVE
+            # This avoids "No space left on device" errors when local disk is full
+            temp_dir = os.path.join(parent_dir, f".temp_restore_{uuid.uuid4().hex[:8]}")
+            os.makedirs(temp_dir, exist_ok=True)
+
+            try:
                 with tarfile.open(filestore_archive, "r:gz") as tar:
                     # Extract to temp directory
                     tar.extractall(temp_dir)
@@ -840,9 +845,15 @@ class OdooBackupRestore:
                 else:
                     raise Exception("Unable to determine filestore structure in archive")
 
-            self.log("Filestore restored successfully")
-            self.update_progress(90, "Filestore restore complete")
-            return True
+                self.log("Filestore restored successfully")
+                self.update_progress(90, "Filestore restore complete")
+                return True
+
+            finally:
+                # Always clean up the temp directory on the target drive
+                if os.path.exists(temp_dir):
+                    self.log(f"Cleaning up temporary extraction directory...")
+                    shutil.rmtree(temp_dir, ignore_errors=True)
 
         except Exception as e:
             self.log(f"Error restoring filestore: {str(e)}", "error")
@@ -1088,7 +1099,7 @@ class OdooBackupRestore:
             );
             
             -- Disable all scheduled actions (crons)
-            UPDATE ir_cron SET active = false WHERE active = true;
+            UPDATE ir_cron SET active = false;
             
             -- Clear all email queues
             DELETE FROM mail_mail WHERE state IN ('outgoing', 'exception', 'cancel');
