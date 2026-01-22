@@ -62,11 +62,11 @@ build: dev
 run: run-gui
 
 # Run CLI without installation
-run-cli:
+run-cli: deps
 	@./dev_run.sh $(ARGS)
 
-# Run GUI without installation  
-run-gui:
+# Run GUI without installation
+run-gui: deps
 	@PYTHONPATH=. venv/bin/python -m odoo_backup_tool.gui_launcher
 
 # Run tests (standard target)
