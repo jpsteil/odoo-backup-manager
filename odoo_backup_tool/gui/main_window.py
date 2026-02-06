@@ -198,11 +198,16 @@ class OdooBackupRestoreGUI:
             command=self.update_operation_ui
         ).pack(side="left", padx=10)
         ttk.Radiobutton(
-            mode_options_frame, text="Restore Only", 
+            mode_options_frame, text="Restore Only",
             variable=self.operation_mode, value="restore_only",
             command=self.update_operation_ui
         ).pack(side="left", padx=10)
-        
+        ttk.Radiobutton(
+            mode_options_frame, text="Docker Export",
+            variable=self.operation_mode, value="docker_export",
+            command=self.update_operation_ui
+        ).pack(side="left", padx=10)
+
         # Backup/Restore file options (initially hidden)
         self.file_options_frame = ttk.Frame(self.mode_frame)
         self.file_options_frame.pack(side="left", padx=20)
@@ -305,6 +310,63 @@ class OdooBackupRestoreGUI:
         # Add tooltip to explain neutralization
         # Note: Neutralization will disable emails, crons, and set safe defaults
 
+        # Docker Export options frame (initially hidden)
+        self.docker_export_frame = ttk.LabelFrame(
+            main_container, text="Docker Export Options", padding="10"
+        )
+        # Not packed initially - shown only when docker_export mode is selected
+
+        self.docker_profile_var = tk.StringVar()
+        self.docker_profile_map = {}  # name -> id
+
+        ttk.Label(self.docker_export_frame, text="Export Profile:").grid(
+            row=0, column=0, sticky="w", padx=5, pady=2
+        )
+        self.docker_profile_combo = ttk.Combobox(
+            self.docker_export_frame,
+            textvariable=self.docker_profile_var,
+            state="readonly",
+            width=30,
+        )
+        self.docker_profile_combo.grid(row=0, column=1, sticky="w", padx=5, pady=2)
+        self.docker_profile_combo.bind(
+            "<<ComboboxSelected>>", lambda e: self.on_docker_profile_selected()
+        )
+
+        docker_btn_frame = ttk.Frame(self.docker_export_frame)
+        docker_btn_frame.grid(row=0, column=2, padx=5, pady=2)
+        ttk.Button(
+            docker_btn_frame, text="New", command=self.new_docker_profile
+        ).pack(side="left", padx=2)
+        ttk.Button(
+            docker_btn_frame, text="Edit", command=self.edit_docker_profile
+        ).pack(side="left", padx=2)
+        ttk.Button(
+            docker_btn_frame, text="Delete", command=self.delete_docker_profile
+        ).pack(side="left", padx=2)
+
+        # Profile info label
+        self.docker_profile_info = ttk.Label(
+            self.docker_export_frame, text="No profile selected", foreground="gray"
+        )
+        self.docker_profile_info.grid(
+            row=1, column=0, columnspan=3, sticky="w", padx=5, pady=2
+        )
+
+        # Output directory
+        self.docker_output_var = tk.StringVar(value=self.backup_directory)
+        ttk.Label(self.docker_export_frame, text="Save to:").grid(
+            row=2, column=0, sticky="w", padx=5, pady=2
+        )
+        ttk.Entry(
+            self.docker_export_frame, textvariable=self.docker_output_var, width=40
+        ).grid(row=2, column=1, sticky="ew", padx=5, pady=2)
+        ttk.Button(
+            self.docker_export_frame,
+            text="Browse",
+            command=self.browse_docker_output,
+        ).grid(row=2, column=2, sticky="w", padx=5, pady=2)
+
         # Progress
         progress_frame = ttk.Frame(main_container)
         progress_frame.pack(fill="x", pady=10)
@@ -314,6 +376,10 @@ class OdooBackupRestoreGUI:
 
         self.progress_bar = ttk.Progressbar(progress_frame, mode="determinate")
         self.progress_bar.pack(fill="x", pady=5)
+
+        # Action buttons - pack before log so they stay visible
+        button_frame = ttk.Frame(main_container)
+        button_frame.pack(side="bottom", pady=10)
 
         # Log - takes remaining space
         log_frame = ttk.LabelFrame(main_container, text="Output Log", padding="5")
@@ -328,10 +394,6 @@ class OdooBackupRestoreGUI:
         self.log_text.tag_config("warning", foreground="orange")
         self.log_text.tag_config("success", foreground="green")
         self.log_text.tag_config("info", foreground="black")
-
-        # Action buttons
-        button_frame = ttk.Frame(main_container)
-        button_frame.pack(pady=10)
 
         self.execute_btn = ttk.Button(
             button_frame,
@@ -2342,16 +2404,17 @@ https://github.com/jpsteil/odoo-backup-manager
     def update_operation_ui(self):
         """Update UI based on selected operation mode"""
         mode = self.operation_mode.get()
-        
+
         # Hide all frames first
         self.backup_file_frame.pack_forget()
         self.restore_file_frame.pack_forget()
         self.source_frame.pack_forget()
         self.dest_frame.pack_forget()
-        
+        self.docker_export_frame.pack_forget()
+
         # Get the parent and find where to insert (after Operation Mode frame)
         # We need to re-pack in the correct order
-        
+
         if mode == "backup_restore":
             # Show both source and destination
             self.source_frame.pack(fill="x", pady=5, after=self.mode_frame)
@@ -2363,7 +2426,7 @@ https://github.com/jpsteil/odoo-backup-manager
             # Show backup file selector
             self.backup_file_frame.pack(side="left")
             self.execute_btn.config(text="Execute Backup")
-            
+
             # If a source is already selected, set default filename
             conn_name = self.source_conn.get()
             if conn_name:
@@ -2373,14 +2436,20 @@ https://github.com/jpsteil/odoo-backup-manager
                 default_filename = os.path.join(default_dir, f"backup_{conn_name}_{timestamp}.tar.gz")
                 self.backup_file_var.set(default_filename)
         elif mode == "restore_only":
-            # Show only destination  
+            # Show only destination
             self.dest_frame.pack(fill="x", pady=5, after=self.mode_frame)
             # Show restore file selector
             self.restore_file_frame.pack(side="left")
             self.execute_btn.config(text="Execute Restore")
             # Refresh available restore files for the selected destination
             self.refresh_restore_files()
-            
+        elif mode == "docker_export":
+            # Show source connection and Docker export options
+            self.source_frame.pack(fill="x", pady=5, after=self.mode_frame)
+            self.docker_export_frame.pack(fill="x", pady=5, after=self.source_frame)
+            self.execute_btn.config(text="Export Docker Package")
+            self.refresh_docker_profiles()
+
         # Update window size after UI changes
         self.update_window_size()
     
@@ -2518,15 +2587,17 @@ https://github.com/jpsteil/odoo-backup-manager
         self.root.update_idletasks()
 
     def execute_operation(self):
-        """Execute the selected operation (backup, restore, or both)"""
+        """Execute the selected operation (backup, restore, both, or docker export)"""
         mode = self.operation_mode.get()
-        
+
         if mode == "backup_restore":
             self.execute_backup_restore()
         elif mode == "backup_only":
             self.execute_backup_only()
         elif mode == "restore_only":
             self.execute_restore_only()
+        elif mode == "docker_export":
+            self.execute_docker_export()
     
     def execute_backup_only(self):
         """Execute backup only to zip file"""
@@ -2805,6 +2876,235 @@ https://github.com/jpsteil/odoo-backup-manager
         self.execute_btn.config(state="disabled")
         self.progress_bar.start()
         threading.Thread(target=run_restore, daemon=True).start()
+
+    # ---- Docker Export Methods ----
+
+    def refresh_docker_profiles(self):
+        """Refresh the Docker export profiles dropdown"""
+        profiles = self.conn_manager.list_docker_export_profiles()
+        self.docker_profile_map = {}
+        names = []
+        for p in profiles:
+            names.append(p["name"])
+            self.docker_profile_map[p["name"]] = p["id"]
+        self.docker_profile_combo["values"] = names
+        if names and not self.docker_profile_var.get():
+            self.docker_profile_combo.current(0)
+            self.on_docker_profile_selected()
+
+    def on_docker_profile_selected(self):
+        """Update info label when a Docker profile is selected"""
+        name = self.docker_profile_var.get()
+        if name and name in self.docker_profile_map:
+            profile = self.conn_manager.get_docker_export_profile(
+                self.docker_profile_map[name]
+            )
+            if profile:
+                import json as _json
+                subdirs = _json.loads(profile.get("source_subdirs", "[]"))
+                info = (
+                    f"Source: {profile['source_base_dir']}  |  "
+                    f"Dirs: {', '.join(subdirs)}  |  "
+                    f"PG {profile['postgres_version']}  |  "
+                    f"Py {profile['python_version']}"
+                )
+                self.docker_profile_info.config(text=info, foreground="black")
+                return
+        self.docker_profile_info.config(
+            text="No profile selected", foreground="gray"
+        )
+
+    def new_docker_profile(self):
+        """Open dialog to create a new Docker export profile"""
+        from .dialogs.docker_export_dialog import DockerExportDialog
+
+        dialog = DockerExportDialog(
+            self.root, "New Docker Export Profile", self.conn_manager
+        )
+        self.root.wait_window(dialog)
+        if dialog.result:
+            name = dialog.result.pop("name")
+            self.conn_manager.save_docker_export_profile(name, dialog.result)
+            self.refresh_docker_profiles()
+            self.docker_profile_var.set(name)
+            self.on_docker_profile_selected()
+            self.log_message(f"Docker export profile '{name}' created", "success")
+
+    def edit_docker_profile(self):
+        """Open dialog to edit selected Docker export profile"""
+        from .dialogs.docker_export_dialog import DockerExportDialog
+
+        name = self.docker_profile_var.get()
+        if not name or name not in self.docker_profile_map:
+            messagebox.showerror("Error", "Please select a profile to edit")
+            return
+
+        profile_id = self.docker_profile_map[name]
+        profile_data = self.conn_manager.get_docker_export_profile(profile_id)
+
+        dialog = DockerExportDialog(
+            self.root,
+            "Edit Docker Export Profile",
+            self.conn_manager,
+            profile_data=profile_data,
+        )
+        self.root.wait_window(dialog)
+        if dialog.result:
+            new_name = dialog.result.pop("name")
+            self.conn_manager.update_docker_export_profile(
+                profile_id, new_name, dialog.result
+            )
+            self.refresh_docker_profiles()
+            self.docker_profile_var.set(new_name)
+            self.on_docker_profile_selected()
+            self.log_message(f"Docker export profile '{new_name}' updated", "success")
+
+    def delete_docker_profile(self):
+        """Delete selected Docker export profile"""
+        name = self.docker_profile_var.get()
+        if not name or name not in self.docker_profile_map:
+            messagebox.showerror("Error", "Please select a profile to delete")
+            return
+
+        if not messagebox.askyesno(
+            "Confirm Delete", f"Delete Docker export profile '{name}'?"
+        ):
+            return
+
+        profile_id = self.docker_profile_map[name]
+        self.conn_manager.delete_docker_export_profile(profile_id)
+        self.docker_profile_var.set("")
+        self.refresh_docker_profiles()
+        self.docker_profile_info.config(
+            text="No profile selected", foreground="gray"
+        )
+        self.log_message(f"Docker export profile '{name}' deleted", "info")
+
+    def browse_docker_output(self):
+        """Browse for Docker export output directory"""
+        directory = filedialog.askdirectory(
+            initialdir=self.docker_output_var.get() or self.backup_directory,
+            title="Select output directory for Docker export",
+        )
+        if directory:
+            self.docker_output_var.set(directory)
+
+    def execute_docker_export(self):
+        """Execute Docker export operation"""
+        from ..docker.exporter import DockerExporter
+
+        source_name = self.source_conn.get()
+        profile_name = self.docker_profile_var.get()
+
+        if not source_name:
+            messagebox.showerror("Error", "Please select a source connection")
+            return
+
+        if not profile_name or profile_name not in self.docker_profile_map:
+            messagebox.showerror("Error", "Please select a Docker export profile")
+            return
+
+        # Load source connection
+        if not hasattr(self, "odoo_conn_map") or source_name not in self.odoo_conn_map:
+            messagebox.showerror("Error", "Source connection not found")
+            return
+
+        source_conn_id = self.odoo_conn_map[source_name]
+        source_conn = self.conn_manager.get_odoo_connection(source_conn_id)
+
+        if not source_conn:
+            messagebox.showerror("Error", "Failed to load source connection details")
+            return
+
+        # Load Docker export profile
+        profile_id = self.docker_profile_map[profile_name]
+        profile = self.conn_manager.get_docker_export_profile(profile_id)
+
+        if not profile:
+            messagebox.showerror("Error", "Failed to load Docker export profile")
+            return
+
+        # Build source config
+        source_config = {
+            "db_host": source_conn["host"],
+            "db_port": source_conn["port"],
+            "db_user": source_conn["username"],
+            "db_password": source_conn["password"],
+            "db_name": source_conn["database"],
+            "filestore_path": source_conn["filestore_path"],
+            "odoo_version": source_conn.get("odoo_version", "17.0"),
+            "use_ssh": source_conn["use_ssh"],
+            "ssh_connection_id": source_conn["ssh_connection_id"],
+            "backup_dir": self.docker_output_var.get() or self.backup_directory,
+            "backup_filestore": True,
+        }
+
+        if not source_config["db_name"]:
+            messagebox.showerror(
+                "Error", "No database name configured on the source connection"
+            )
+            return
+
+        # Confirm
+        if not messagebox.askyesno(
+            "Confirm Docker Export",
+            f"Create Docker export for database '{source_config['db_name']}'?\n\n"
+            f"Source: {source_name}\n"
+            f"Profile: {profile_name}\n"
+            f"Output: {source_config['backup_dir']}",
+        ):
+            return
+
+        def run_docker_export():
+            try:
+                self.log_message("Starting Docker export...", "info")
+                exporter = DockerExporter(
+                    progress_callback=lambda val, msg: self.root.after(
+                        0, self.update_progress, val, msg
+                    ),
+                    log_callback=lambda msg, level: self.root.after(
+                        0, self.log_message, msg, level
+                    ),
+                    conn_manager=self.conn_manager,
+                )
+                output_path = exporter.export(source_config, profile)
+
+                if output_path:
+                    self.root.after(
+                        0,
+                        lambda: messagebox.showinfo(
+                            "Success",
+                            f"Docker export completed!\n\nSaved to:\n{output_path}",
+                        ),
+                    )
+                    self.root.after(0, self.refresh_backup_files)
+                else:
+                    self.root.after(
+                        0,
+                        lambda: messagebox.showerror(
+                            "Error", "Docker export failed"
+                        ),
+                    )
+            except Exception as e:
+                error_msg = str(e)
+                self.root.after(
+                    0, self.log_message, f"Error: {error_msg}", "error"
+                )
+                self.root.after(
+                    0,
+                    lambda: messagebox.showerror(
+                        "Error", f"Docker export failed:\n{error_msg}"
+                    ),
+                )
+            finally:
+                self.root.after(0, self.progress_bar.stop)
+                self.root.after(
+                    0, lambda: self.execute_btn.config(state="normal")
+                )
+
+        self.execute_btn.config(state="disabled")
+        self.progress_bar.start()
+        threading.Thread(target=run_docker_export, daemon=True).start()
 
     def execute_backup_restore(self):
         """Execute backup and restore operation"""

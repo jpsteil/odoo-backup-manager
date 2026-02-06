@@ -201,6 +201,49 @@ Examples:
     config_parser.add_argument("--backup", action="store_true", help="Perform backup")
     config_parser.add_argument("--output-dir", help="Output directory for backup")
 
+    # Docker export command
+    docker_parser = subparsers.add_parser(
+        "docker-export",
+        help="Create a self-contained Docker export package",
+    )
+    docker_parser.add_argument(
+        "--connection", "-c", required=True,
+        help="Source Odoo connection profile name",
+    )
+    docker_parser.add_argument(
+        "--profile", "-p",
+        help="Docker export profile name (uses manual args if not specified)",
+    )
+    docker_parser.add_argument(
+        "--output-dir", "-o",
+        help="Output directory (defaults to backup directory)",
+    )
+    # Manual overrides (for use without saved profiles)
+    docker_parser.add_argument(
+        "--source-dir",
+        help="Remote source base directory (e.g., /home/administrator/qlf)",
+    )
+    docker_parser.add_argument(
+        "--subdirs",
+        help="Comma-separated source subdirectories (e.g., odoo,qlf-odoo,LIMS17)",
+    )
+    docker_parser.add_argument(
+        "--venv-path",
+        help="Remote Python venv path",
+    )
+    docker_parser.add_argument(
+        "--extra-files",
+        help="Comma-separated extra files to include (e.g., full_update.sh)",
+    )
+    docker_parser.add_argument(
+        "--pg-version", default="16",
+        help="PostgreSQL version for Docker image (default: 16)",
+    )
+    docker_parser.add_argument(
+        "--python-version", default="3.12",
+        help="Python version for Docker image (default: 3.12)",
+    )
+
     # GUI command (explicit)
     gui_parser = subparsers.add_parser("gui", help="Launch GUI interface")
 
@@ -235,6 +278,8 @@ def handle_cli(parser, args):
         handle_connections(args)
     elif args.command == "from-config":
         handle_from_config(args)
+    elif args.command == "docker-export":
+        handle_docker_export(args)
     else:
         parser.print_help()
         sys.exit(1)
@@ -618,6 +663,112 @@ def handle_from_config(args):
             sys.exit(1)
     else:
         print("Config file loaded. Use --backup to create a backup.")
+
+
+def handle_docker_export(args):
+    """Handle docker-export command"""
+    import json
+    from .docker.exporter import DockerExporter
+    from .db.connection_manager import ConnectionManager
+    from .utils.config import Config
+
+    conn_manager = ConnectionManager()
+    config = Config()
+
+    # Resolve source Odoo connection
+    connections = conn_manager.list_connections()
+    conn = next(
+        (c for c in connections if c["name"] == args.connection and c["type"] == "odoo"),
+        None,
+    )
+    if not conn:
+        print(f"Error: Odoo connection '{args.connection}' not found")
+        print("\nAvailable Odoo connections:")
+        for c in connections:
+            if c["type"] == "odoo":
+                print(f"  - {c['name']}")
+        sys.exit(1)
+
+    conn_data = conn_manager.get_odoo_connection(conn["id"])
+
+    source_config = {
+        "db_name": conn_data["database"],
+        "db_host": conn_data["host"],
+        "db_port": conn_data["port"],
+        "db_user": conn_data["username"],
+        "db_password": conn_data["password"],
+        "filestore_path": conn_data["filestore_path"],
+        "odoo_version": conn_data.get("odoo_version", "17.0"),
+        "use_ssh": conn_data["use_ssh"],
+        "ssh_connection_id": conn_data["ssh_connection_id"],
+        "backup_dir": args.output_dir or config.get_backup_dir(),
+        "backup_filestore": True,
+    }
+
+    if not source_config["db_name"]:
+        print("Error: No database name configured on this connection")
+        sys.exit(1)
+
+    # Resolve Docker export profile
+    if args.profile:
+        # Load saved profile
+        profiles = conn_manager.list_docker_export_profiles()
+        profile_match = next(
+            (p for p in profiles if p["name"] == args.profile), None
+        )
+        if not profile_match:
+            print(f"Error: Docker export profile '{args.profile}' not found")
+            print("\nAvailable profiles:")
+            for p in profiles:
+                print(f"  - {p['name']} (connection: {p['odoo_connection_name']})")
+            sys.exit(1)
+        profile = conn_manager.get_docker_export_profile(profile_match["id"])
+    else:
+        # Build profile from manual args
+        if not args.source_dir:
+            print("Error: --source-dir is required when not using a saved profile")
+            print("Use --profile to use a saved profile, or provide --source-dir")
+            sys.exit(1)
+
+        subdirs = (
+            args.subdirs.split(",") if args.subdirs
+            else ["odoo", "qlf-odoo", "LIMS17"]
+        )
+        extra_files = (
+            args.extra_files.split(",") if args.extra_files
+            else ["full_update.sh"]
+        )
+
+        profile = {
+            "odoo_connection_id": conn["id"],
+            "source_base_dir": args.source_dir,
+            "source_subdirs": json.dumps(subdirs),
+            "venv_path": args.venv_path or "/home/administrator/venv/odoo",
+            "extra_files": json.dumps(extra_files),
+            "odoo_conf_path": "odoo/odoo.conf",
+            "container_base_dir": "/opt/odoo/qlf",
+            "postgres_version": args.pg_version,
+            "python_version": args.python_version,
+            "odoo_port": 8069,
+            "mailpit_http_port": 8025,
+            "custom_neutralize_sql": "",
+        }
+
+    print(f"Starting Docker export for database: {source_config['db_name']}")
+    print(f"Source: {profile.get('source_base_dir')}")
+    print(f"Output: {source_config['backup_dir']}")
+
+    try:
+        exporter = DockerExporter(conn_manager=conn_manager)
+        output_path = exporter.export(source_config, profile)
+        print(f"\nDocker export completed: {output_path}")
+        print("\nTo use:")
+        print(f"  tar xzf {os.path.basename(output_path)}")
+        print(f"  cd {os.path.basename(output_path).replace('.tar.gz', '')}")
+        print("  docker compose up")
+    except Exception as e:
+        print(f"Docker export failed: {e}")
+        sys.exit(1)
 
 
 if __name__ == "__main__":

@@ -7,5 +7,6 @@ __author__ = "Odoo Backup Tool Team"
 
 from .core.backup_restore import OdooBackupRestore
 from .db.connection_manager import ConnectionManager
+from .docker.exporter import DockerExporter
 
-__all__ = ["OdooBackupRestore", "ConnectionManager"]
+__all__ = ["OdooBackupRestore", "ConnectionManager", "DockerExporter"]

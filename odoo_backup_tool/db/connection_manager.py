@@ -111,6 +111,31 @@ class ConnectionManager:
             """
         )
 
+        # Create Docker export profiles table
+        cursor.execute(
+            """
+            CREATE TABLE IF NOT EXISTS docker_export_profiles (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL,
+                odoo_connection_id INTEGER NOT NULL,
+                source_base_dir TEXT NOT NULL DEFAULT '/home/administrator/qlf',
+                source_subdirs TEXT NOT NULL DEFAULT '["odoo","qlf-odoo","LIMS17"]',
+                venv_path TEXT NOT NULL DEFAULT '/home/administrator/venv/odoo',
+                extra_files TEXT DEFAULT '["full_update.sh"]',
+                odoo_conf_path TEXT DEFAULT 'odoo/odoo.conf',
+                container_base_dir TEXT NOT NULL DEFAULT '/opt/odoo/qlf',
+                postgres_version TEXT NOT NULL DEFAULT '16',
+                python_version TEXT NOT NULL DEFAULT '3.12',
+                odoo_port INTEGER NOT NULL DEFAULT 8069,
+                mailpit_http_port INTEGER NOT NULL DEFAULT 8025,
+                custom_neutralize_sql TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (odoo_connection_id) REFERENCES odoo_connections(id) ON DELETE CASCADE
+            )
+            """
+        )
+
         # Migrate data from old schema if it exists
         if old_table_exists:
             self._migrate_old_schema(cursor)
@@ -592,3 +617,188 @@ class ConnectionManager:
         )
         conn.commit()
         conn.close()
+
+    # ---- Docker Export Profile CRUD ----
+
+    def save_docker_export_profile(self, name, config):
+        """Save a Docker export profile"""
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+
+        try:
+            cursor.execute(
+                """
+                INSERT OR REPLACE INTO docker_export_profiles
+                (name, odoo_connection_id, source_base_dir, source_subdirs,
+                 venv_path, extra_files, odoo_conf_path, container_base_dir,
+                 postgres_version, python_version, odoo_port, mailpit_http_port,
+                 custom_neutralize_sql)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    name,
+                    config["odoo_connection_id"],
+                    config.get("source_base_dir", "/home/administrator/qlf"),
+                    config.get("source_subdirs", '["odoo","qlf-odoo","LIMS17"]'),
+                    config.get("venv_path", "/home/administrator/venv/odoo"),
+                    config.get("extra_files", '["full_update.sh"]'),
+                    config.get("odoo_conf_path", "odoo/odoo.conf"),
+                    config.get("container_base_dir", "/opt/odoo/qlf"),
+                    config.get("postgres_version", "16"),
+                    config.get("python_version", "3.12"),
+                    config.get("odoo_port", 8069),
+                    config.get("mailpit_http_port", 8025),
+                    config.get("custom_neutralize_sql", ""),
+                ),
+            )
+            conn.commit()
+            return True
+        except sqlite3.IntegrityError:
+            return False
+        finally:
+            conn.close()
+
+    def update_docker_export_profile(self, profile_id, name, config):
+        """Update a Docker export profile by ID"""
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+
+        try:
+            cursor.execute(
+                """
+                UPDATE docker_export_profiles
+                SET name = ?, odoo_connection_id = ?, source_base_dir = ?,
+                    source_subdirs = ?, venv_path = ?, extra_files = ?,
+                    odoo_conf_path = ?, container_base_dir = ?,
+                    postgres_version = ?, python_version = ?, odoo_port = ?,
+                    mailpit_http_port = ?, custom_neutralize_sql = ?,
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE id = ?
+                """,
+                (
+                    name,
+                    config["odoo_connection_id"],
+                    config.get("source_base_dir", "/home/administrator/qlf"),
+                    config.get("source_subdirs", '["odoo","qlf-odoo","LIMS17"]'),
+                    config.get("venv_path", "/home/administrator/venv/odoo"),
+                    config.get("extra_files", '["full_update.sh"]'),
+                    config.get("odoo_conf_path", "odoo/odoo.conf"),
+                    config.get("container_base_dir", "/opt/odoo/qlf"),
+                    config.get("postgres_version", "16"),
+                    config.get("python_version", "3.12"),
+                    config.get("odoo_port", 8069),
+                    config.get("mailpit_http_port", 8025),
+                    config.get("custom_neutralize_sql", ""),
+                    profile_id,
+                ),
+            )
+            conn.commit()
+            return cursor.rowcount > 0
+        except sqlite3.IntegrityError:
+            return False
+        finally:
+            conn.close()
+
+    def get_docker_export_profile(self, profile_id):
+        """Get a Docker export profile by ID"""
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            SELECT
+                d.id,                    -- 0
+                d.name,                  -- 1
+                d.odoo_connection_id,    -- 2
+                d.source_base_dir,       -- 3
+                d.source_subdirs,        -- 4
+                d.venv_path,             -- 5
+                d.extra_files,           -- 6
+                d.odoo_conf_path,        -- 7
+                d.container_base_dir,    -- 8
+                d.postgres_version,      -- 9
+                d.python_version,        -- 10
+                d.odoo_port,             -- 11
+                d.mailpit_http_port,     -- 12
+                d.custom_neutralize_sql, -- 13
+                d.created_at,            -- 14
+                d.updated_at,            -- 15
+                o.name as conn_name      -- 16
+            FROM docker_export_profiles d
+            LEFT JOIN odoo_connections o ON d.odoo_connection_id = o.id
+            WHERE d.id = ?
+            """,
+            (profile_id,),
+        )
+        row = cursor.fetchone()
+        conn.close()
+
+        if row:
+            return {
+                "id": row[0],
+                "name": row[1],
+                "odoo_connection_id": row[2],
+                "source_base_dir": row[3],
+                "source_subdirs": row[4],
+                "venv_path": row[5],
+                "extra_files": row[6],
+                "odoo_conf_path": row[7],
+                "container_base_dir": row[8],
+                "postgres_version": row[9],
+                "python_version": row[10],
+                "odoo_port": row[11],
+                "mailpit_http_port": row[12],
+                "custom_neutralize_sql": row[13] or "",
+                "created_at": row[14],
+                "updated_at": row[15],
+                "odoo_connection_name": row[16] or "",
+            }
+        return None
+
+    def list_docker_export_profiles(self, odoo_connection_id=None):
+        """List Docker export profiles, optionally filtered by connection"""
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+
+        if odoo_connection_id:
+            cursor.execute(
+                """
+                SELECT d.id, d.name, o.name as conn_name
+                FROM docker_export_profiles d
+                LEFT JOIN odoo_connections o ON d.odoo_connection_id = o.id
+                WHERE d.odoo_connection_id = ?
+                ORDER BY d.name
+                """,
+                (odoo_connection_id,),
+            )
+        else:
+            cursor.execute(
+                """
+                SELECT d.id, d.name, o.name as conn_name
+                FROM docker_export_profiles d
+                LEFT JOIN odoo_connections o ON d.odoo_connection_id = o.id
+                ORDER BY d.name
+                """
+            )
+
+        profiles = []
+        for row in cursor.fetchall():
+            profiles.append({
+                "id": row[0],
+                "name": row[1],
+                "odoo_connection_name": row[2] or "",
+            })
+
+        conn.close()
+        return profiles
+
+    def delete_docker_export_profile(self, profile_id):
+        """Delete a Docker export profile by ID"""
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        cursor.execute(
+            "DELETE FROM docker_export_profiles WHERE id = ?", (profile_id,)
+        )
+        conn.commit()
+        affected = cursor.rowcount > 0
+        conn.close()
+        return affected
