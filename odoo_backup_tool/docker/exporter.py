@@ -20,6 +20,7 @@ from .templates import (
     DOCKERFILE_TEMPLATE,
     ENTRYPOINT_TEMPLATE,
     ODOO_CONF_TEMPLATE,
+    START_ODOO_DOCKER_TEMPLATE,
 )
 
 
@@ -122,6 +123,12 @@ class DockerExporter:
             self.update_progress(85, "Generating Docker configuration...")
             self._generate_docker_files(source_config, profile, subdirs)
 
+            # Step 8b: Generate clone.conf if git clone configured
+            git_repo_url = profile.get("git_repo_url", "")
+            git_clone_subdir = profile.get("git_clone_subdir", "")
+            if git_repo_url and git_clone_subdir:
+                self._generate_clone_conf(git_repo_url, git_clone_subdir)
+
             # Step 9: Generate neutralize.sql (90-92%)
             self.update_progress(90, "Generating neutralization SQL...")
             self._generate_neutralize_sql(profile)
@@ -137,6 +144,24 @@ class DockerExporter:
             self.update_progress(100, "Docker export complete!")
             self.log(f"Docker export saved to: {output_path}", "success")
             self.log("=== Docker Export Complete ===", "success")
+            self.log("")
+            self.log("--- Next Steps ---")
+            archive_name = os.path.basename(output_path)
+            self.log(f"  1. Extract the startup script from the archive:")
+            self.log(f"       tar xzf {archive_name} start_odoo_docker.sh")
+            self.log(f"       mv start_odoo_docker.sh ~/scripts/")
+            self.log(f"       chmod +x ~/scripts/start_odoo_docker.sh")
+            self.log(f"  2. Run it:")
+            self.log(f"       ~/scripts/start_odoo_docker.sh")
+            self.log("")
+            self.log("  On first run it will extract the archive, build containers,")
+            self.log("  and start Odoo. Subsequent runs auto-detect git-changed")
+            self.log("  modules and upgrade them.")
+            self.log("")
+            self.log("  Other modes:")
+            self.log("    --fresh [archive]   Tear down, re-extract, rebuild")
+            self.log("    --all               Upgrade all installed repo modules")
+            self.log("    -u module_name      Upgrade a specific module")
             return output_path
 
         except Exception as e:
@@ -183,17 +208,23 @@ class DockerExporter:
         """Copy source directories from local filesystem"""
         source_base = profile["source_base_dir"]
         dest_base = os.path.join(self.staging_dir, "qlf")
+        git_clone_subdir = profile.get("git_clone_subdir", "")
 
+        copied = []
         for subdir in subdirs:
+            if git_clone_subdir and subdir == git_clone_subdir:
+                self.log(f"Skipping {subdir} (will be git cloned at runtime)")
+                continue
             src = os.path.join(source_base, subdir)
             dst = os.path.join(dest_base, subdir)
             if os.path.exists(src):
                 self.log(f"Copying {src}...")
                 shutil.copytree(src, dst, symlinks=True)
+                copied.append(subdir)
             else:
                 self.log(f"Warning: Source directory not found: {src}", "warning")
 
-        self.log(f"Source tree copied: {', '.join(subdirs)}")
+        self.log(f"Source tree copied: {', '.join(copied)}")
 
     def _download_remote_source_tree(self, source_config, profile, subdirs):
         """Download source directories from remote server via SSH"""
@@ -202,7 +233,11 @@ class DockerExporter:
 
         try:
             source_base = profile["source_base_dir"]
-            subdirs_str = " ".join(subdirs)
+            git_clone_subdir = profile.get("git_clone_subdir", "")
+            copy_subdirs = [s for s in subdirs if s != git_clone_subdir]
+            if git_clone_subdir:
+                self.log(f"Skipping {git_clone_subdir} (will be git cloned at runtime)")
+            subdirs_str = " ".join(copy_subdirs)
             remote_temp = f"/tmp/qlf_source_{self.timestamp}.tar.gz"
 
             self.log(f"Creating remote archive of {source_base}/({subdirs_str})...")
@@ -420,6 +455,21 @@ class DockerExporter:
         )
         self._write_staging_file("odoo.conf", odoo_conf)
 
+        # Generate start_odoo_docker.sh (host-side orchestration script)
+        repo_subdir = profile.get("git_clone_subdir", "").strip()
+        if not repo_subdir:
+            # Fall back to first non-odoo subdir (likely the custom modules repo)
+            for subdir in subdirs:
+                if not subdir.startswith("odoo"):
+                    repo_subdir = subdir
+                    break
+            if not repo_subdir:
+                repo_subdir = subdirs[0] if subdirs else "odoo"
+        start_script = START_ODOO_DOCKER_TEMPLATE.substitute(
+            repo_subdir=repo_subdir,
+        )
+        self._write_staging_file("start_odoo_docker.sh", start_script)
+
         self.log("Docker configuration files generated")
 
     def _build_addons_path(self, profile, subdirs, container_base):
@@ -437,10 +487,15 @@ class DockerExporter:
             if "options" in config:
                 prod_addons = config["options"].get("addons_path", "")
                 if prod_addons:
+                    conf_dir = os.path.join(
+                        profile["source_base_dir"],
+                        os.path.dirname(odoo_conf_rel),
+                    )
                     return self._remap_addons_path(
                         prod_addons,
                         profile["source_base_dir"],
                         container_base,
+                        conf_dir,
                     )
 
         # Fallback: build from subdirs
@@ -457,27 +512,40 @@ class DockerExporter:
                 paths.append(f"{container_base}/{subdir}")
         return ",".join(paths)
 
-    def _remap_addons_path(self, prod_addons_path, source_base_dir, container_base):
+    def _remap_addons_path(self, prod_addons_path, source_base_dir, container_base, conf_dir):
         """Remap production addons_path to container paths.
 
+        Handles both absolute paths and relative paths (resolved against
+        the directory containing odoo.conf).
+
         Example: /home/administrator/qlf/odoo/addons -> /opt/odoo/qlf/odoo/addons
+        Example: ../qlf-odoo -> resolved via conf_dir -> /opt/odoo/qlf/qlf-odoo
         """
         paths = []
         for path in prod_addons_path.split(","):
             path = path.strip()
             if not path:
                 continue
+            # Resolve relative paths against the odoo.conf directory
+            if not os.path.isabs(path):
+                path = os.path.normpath(os.path.join(conf_dir, path))
             # Try to make relative to source_base_dir
             if path.startswith(source_base_dir):
                 relative = path[len(source_base_dir):].lstrip("/")
                 paths.append(f"{container_base}/{relative}")
             else:
-                # Unknown path - try to extract meaningful suffix
-                # e.g., /usr/lib/python3/dist-packages/odoo/addons -> skip
                 self.log(
                     f"Skipping unmapped addons path: {path}", "warning"
                 )
         return ",".join(paths)
+
+    def _generate_clone_conf(self, repo_url, subdir):
+        """Write clone.conf so the start script knows what to git clone"""
+        conf_path = os.path.join(self.staging_dir, "clone.conf")
+        with open(conf_path, "w") as f:
+            f.write(f"repo_url={repo_url}\n")
+            f.write(f"subdir={subdir}\n")
+        self.log(f"Git clone config written: {subdir} from {repo_url}")
 
     def _generate_neutralize_sql(self, profile):
         """Generate neutralize.sql file"""

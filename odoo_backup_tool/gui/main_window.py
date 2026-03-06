@@ -286,24 +286,24 @@ class OdooBackupRestoreGUI:
         )
         self.dest_info_label.pack()
 
-        # Options
-        options_frame = ttk.LabelFrame(main_container, text="Options", padding="10")
-        options_frame.pack(fill="x", pady=5)
+        # Options (hidden for Docker Export mode)
+        self.options_frame = ttk.LabelFrame(main_container, text="Options", padding="10")
+        self.options_frame.pack(fill="x", pady=5)
 
         self.db_only = tk.BooleanVar()
         self.filestore_only = tk.BooleanVar()
         self.neutralize = tk.BooleanVar(value=True)  # Default to checked for safety
 
         ttk.Checkbutton(
-            options_frame, text="Database Only", variable=self.db_only
+            self.options_frame, text="Database Only", variable=self.db_only
         ).pack(side="left", padx=10)
         ttk.Checkbutton(
-            options_frame, text="Filestore Only", variable=self.filestore_only
+            self.options_frame, text="Filestore Only", variable=self.filestore_only
         ).pack(side="left", padx=10)
-        
+
         # Neutralize option with tooltip
         neutralize_check = ttk.Checkbutton(
-            options_frame, text="Neutralize on Restore", variable=self.neutralize
+            self.options_frame, text="Neutralize on Restore", variable=self.neutralize
         )
         neutralize_check.pack(side="left", padx=10)
         
@@ -2405,12 +2405,13 @@ https://github.com/jpsteil/odoo-backup-manager
         """Update UI based on selected operation mode"""
         mode = self.operation_mode.get()
 
-        # Hide all frames first
+        # Hide all conditional frames first
         self.backup_file_frame.pack_forget()
         self.restore_file_frame.pack_forget()
         self.source_frame.pack_forget()
         self.dest_frame.pack_forget()
         self.docker_export_frame.pack_forget()
+        self.options_frame.pack_forget()
 
         # Get the parent and find where to insert (after Operation Mode frame)
         # We need to re-pack in the correct order
@@ -2419,12 +2420,14 @@ https://github.com/jpsteil/odoo-backup-manager
             # Show both source and destination
             self.source_frame.pack(fill="x", pady=5, after=self.mode_frame)
             self.dest_frame.pack(fill="x", pady=5, after=self.source_frame)
+            self.options_frame.pack(fill="x", pady=5, after=self.dest_frame)
             self.execute_btn.config(text="Execute Backup & Restore")
         elif mode == "backup_only":
             # Show only source
             self.source_frame.pack(fill="x", pady=5, after=self.mode_frame)
             # Show backup file selector
             self.backup_file_frame.pack(side="left")
+            self.options_frame.pack(fill="x", pady=5, after=self.source_frame)
             self.execute_btn.config(text="Execute Backup")
 
             # If a source is already selected, set default filename
@@ -2440,11 +2443,12 @@ https://github.com/jpsteil/odoo-backup-manager
             self.dest_frame.pack(fill="x", pady=5, after=self.mode_frame)
             # Show restore file selector
             self.restore_file_frame.pack(side="left")
+            self.options_frame.pack(fill="x", pady=5, after=self.dest_frame)
             self.execute_btn.config(text="Execute Restore")
             # Refresh available restore files for the selected destination
             self.refresh_restore_files()
         elif mode == "docker_export":
-            # Show source connection and Docker export options
+            # Show source connection and Docker export options (no Options frame)
             self.source_frame.pack(fill="x", pady=5, after=self.mode_frame)
             self.docker_export_frame.pack(fill="x", pady=5, after=self.source_frame)
             self.execute_btn.config(text="Export Docker Package")

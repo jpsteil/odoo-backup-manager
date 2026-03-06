@@ -123,6 +123,26 @@ class DockerExportDialog(tk.Toplevel):
         self.subdirs_entry.insert(0, "odoo,qlf-odoo,LIMS17")
         row += 1
 
+        # Git Clone Subdir
+        ttk.Label(main_frame, text="Git Clone Subdir:").grid(
+            row=row, column=0, sticky="w", pady=2
+        )
+        self.git_clone_subdir_entry = ttk.Entry(main_frame, width=40)
+        self.git_clone_subdir_entry.grid(
+            row=row, column=1, columnspan=2, sticky="ew", pady=2
+        )
+        row += 1
+
+        # Git Repo URL
+        ttk.Label(main_frame, text="Git Repo URL:").grid(
+            row=row, column=0, sticky="w", pady=2
+        )
+        self.git_repo_url_entry = ttk.Entry(main_frame, width=40)
+        self.git_repo_url_entry.grid(
+            row=row, column=1, columnspan=2, sticky="ew", pady=2
+        )
+        row += 1
+
         # Python Venv Path
         ttk.Label(main_frame, text="Python Venv Path:").grid(
             row=row, column=0, sticky="w", pady=2
@@ -273,6 +293,12 @@ class DockerExportDialog(tk.Toplevel):
         except (json.JSONDecodeError, TypeError):
             pass
 
+        self.git_clone_subdir_entry.delete(0, tk.END)
+        self.git_clone_subdir_entry.insert(0, data.get("git_clone_subdir", ""))
+
+        self.git_repo_url_entry.delete(0, tk.END)
+        self.git_repo_url_entry.insert(0, data.get("git_repo_url", ""))
+
         self.venv_entry.delete(0, tk.END)
         self.venv_entry.insert(0, data.get("venv_path", ""))
 
@@ -377,6 +403,8 @@ class DockerExportDialog(tk.Toplevel):
             "custom_neutralize_sql": self.custom_sql_text.get(
                 "1.0", tk.END
             ).strip(),
+            "git_clone_subdir": self.git_clone_subdir_entry.get().strip(),
+            "git_repo_url": self.git_repo_url_entry.get().strip(),
         }
 
         self.destroy()

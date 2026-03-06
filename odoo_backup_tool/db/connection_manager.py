@@ -129,12 +129,26 @@ class ConnectionManager:
                 odoo_port INTEGER NOT NULL DEFAULT 8069,
                 mailpit_http_port INTEGER NOT NULL DEFAULT 8025,
                 custom_neutralize_sql TEXT,
+                git_clone_subdir TEXT DEFAULT '',
+                git_repo_url TEXT DEFAULT '',
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 FOREIGN KEY (odoo_connection_id) REFERENCES odoo_connections(id) ON DELETE CASCADE
             )
             """
         )
+
+        # Add new columns to docker_export_profiles if missing
+        cursor.execute("PRAGMA table_info(docker_export_profiles)")
+        existing_cols = {col[1] for col in cursor.fetchall()}
+        for col_name, col_def in [
+            ("git_clone_subdir", "TEXT DEFAULT ''"),
+            ("git_repo_url", "TEXT DEFAULT ''"),
+        ]:
+            if col_name not in existing_cols:
+                cursor.execute(
+                    f"ALTER TABLE docker_export_profiles ADD COLUMN {col_name} {col_def}"
+                )
 
         # Migrate data from old schema if it exists
         if old_table_exists:
@@ -632,8 +646,8 @@ class ConnectionManager:
                 (name, odoo_connection_id, source_base_dir, source_subdirs,
                  venv_path, extra_files, odoo_conf_path, container_base_dir,
                  postgres_version, python_version, odoo_port, mailpit_http_port,
-                 custom_neutralize_sql)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 custom_neutralize_sql, git_clone_subdir, git_repo_url)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     name,
@@ -649,6 +663,8 @@ class ConnectionManager:
                     config.get("odoo_port", 8069),
                     config.get("mailpit_http_port", 8025),
                     config.get("custom_neutralize_sql", ""),
+                    config.get("git_clone_subdir", ""),
+                    config.get("git_repo_url", ""),
                 ),
             )
             conn.commit()
@@ -672,6 +688,7 @@ class ConnectionManager:
                     odoo_conf_path = ?, container_base_dir = ?,
                     postgres_version = ?, python_version = ?, odoo_port = ?,
                     mailpit_http_port = ?, custom_neutralize_sql = ?,
+                    git_clone_subdir = ?, git_repo_url = ?,
                     updated_at = CURRENT_TIMESTAMP
                 WHERE id = ?
                 """,
@@ -689,6 +706,8 @@ class ConnectionManager:
                     config.get("odoo_port", 8069),
                     config.get("mailpit_http_port", 8025),
                     config.get("custom_neutralize_sql", ""),
+                    config.get("git_clone_subdir", ""),
+                    config.get("git_repo_url", ""),
                     profile_id,
                 ),
             )
@@ -720,9 +739,11 @@ class ConnectionManager:
                 d.odoo_port,             -- 11
                 d.mailpit_http_port,     -- 12
                 d.custom_neutralize_sql, -- 13
-                d.created_at,            -- 14
-                d.updated_at,            -- 15
-                o.name as conn_name      -- 16
+                d.git_clone_subdir,      -- 14
+                d.git_repo_url,          -- 15
+                d.created_at,            -- 16
+                d.updated_at,            -- 17
+                o.name as conn_name      -- 18
             FROM docker_export_profiles d
             LEFT JOIN odoo_connections o ON d.odoo_connection_id = o.id
             WHERE d.id = ?
@@ -748,9 +769,11 @@ class ConnectionManager:
                 "odoo_port": row[11],
                 "mailpit_http_port": row[12],
                 "custom_neutralize_sql": row[13] or "",
-                "created_at": row[14],
-                "updated_at": row[15],
-                "odoo_connection_name": row[16] or "",
+                "git_clone_subdir": row[14] or "",
+                "git_repo_url": row[15] or "",
+                "created_at": row[16],
+                "updated_at": row[17],
+                "odoo_connection_name": row[18] or "",
             }
         return None
 
